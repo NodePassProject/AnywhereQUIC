@@ -1,5 +1,5 @@
 //
-//  QUICConnection+Send.swift
+//  ConnectionCore+Send.swift
 //  AnywhereQUIC
 //
 //  Created by NodePassProject on 10/5/26.
@@ -7,7 +7,7 @@
 
 import Foundation
 
-extension QUICConnection {
+extension ConnectionCore {
     struct PacketFlags {
         var isACKEliciting = false
         var isPTOEliciting = false
@@ -24,7 +24,7 @@ extension QUICConnection {
         }
     }
 
-    public func write(into buffer: UnsafeMutableBufferPointer<UInt8>, now: QUICInstant) -> QUICOutgoingDatagram? {
+    func write(into buffer: UnsafeMutableBufferPointer<UInt8>, now: QUICInstant) -> QUICOutgoingDatagram? {
         let now = self.updateTimestamp(now.nanoseconds)
         switch self.state {
         case .closed, .draining:
@@ -46,7 +46,7 @@ extension QUICConnection {
         return self.writeClosePacketIfNeeded(into: buffer, now: now)
     }
 
-    public func write(now: QUICInstant) -> (datagram: Data, path: QUICPath)? {
+    func write(now: QUICInstant) -> (datagram: Data, path: QUICPath)? {
         var storage = [UInt8](repeating: 0, count: self.settings.maxSendUDPPayloadSize)
         let result = storage.withUnsafeMutableBufferPointer { self.write(into: $0, now: now) }
         guard let result else {

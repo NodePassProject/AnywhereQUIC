@@ -1,5 +1,5 @@
 //
-//  QUICConnection+Recovery.swift
+//  ConnectionCore+Recovery.swift
 //  AnywhereQUIC
 //
 //  Created by NodePassProject on 10/5/26.
@@ -7,7 +7,7 @@
 
 import Foundation
 
-extension QUICConnection {
+extension ConnectionCore {
     var allSpaces: [PacketNumberSpace] {
         var spaces: [PacketNumberSpace] = []
         if let initialSpace = self.initialSpace {
@@ -502,12 +502,12 @@ extension QUICConnection {
         return Swift.min(earliest, self.pacer.nextSendTime)
     }
 
-    public var nextTimeout: QUICInstant? {
+    var nextTimeout: QUICInstant? {
         let expiry = self.computeExpiry()
         return expiry == Time.never ? nil : QUICInstant(nanoseconds: expiry)
     }
 
-    public func handleTimeout(now: QUICInstant) {
+    func handleTimeout(now: QUICInstant) {
         let now = self.updateTimestamp(now.nanoseconds)
         switch self.state {
         case .closed:
@@ -552,7 +552,7 @@ extension QUICConnection {
         }
     }
 
-    public func finishWriting(now: QUICInstant) {
+    func finishWriting(now: QUICInstant) {
         let now = self.updateTimestamp(now.nanoseconds)
         self.pacer.finishBatch(now: now, pacingRate: self.congestionState.pacingRate)
     }

@@ -1,5 +1,5 @@
 //
-//  QUICConnection+Handshake.swift
+//  ConnectionCore+Handshake.swift
 //  AnywhereQUIC
 //
 //  Created by NodePassProject on 10/5/26.
@@ -7,7 +7,7 @@
 
 import Foundation
 
-extension QUICConnection {
+extension ConnectionCore {
     func startHandshakeIfNeeded(now: Nanoseconds) throws(TransportError) {
         guard !self.hasStartedHandshake else {
             return
@@ -140,7 +140,7 @@ extension QUICConnection {
     }
 }
 
-extension QUICConnection {
+extension ConnectionCore {
     func discardInitialSpace(now: Nanoseconds) {
         guard let space = self.initialSpace else {
             return
@@ -167,7 +167,7 @@ extension QUICConnection {
     }
 }
 
-extension QUICConnection {
+extension ConnectionCore {
     func prepareKeyUpdate(now: Nanoseconds) throws(TransportError) {
         guard let write = self.applicationSpace.writeKeys, let read = self.applicationSpace.readKeys else {
             return

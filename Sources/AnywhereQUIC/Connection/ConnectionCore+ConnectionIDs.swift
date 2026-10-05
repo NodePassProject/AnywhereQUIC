@@ -1,5 +1,5 @@
 //
-//  QUICConnection+ConnectionIDs.swift
+//  ConnectionCore+ConnectionIDs.swift
 //  AnywhereQUIC
 //
 //  Created by NodePassProject on 10/5/26.
@@ -7,7 +7,7 @@
 
 import Foundation
 
-extension QUICConnection {
+extension ConnectionCore {
     func handleNewConnectionID(
         sequence: UInt64,
         retirePriorTo: UInt64,
@@ -137,7 +137,7 @@ extension QUICConnection {
     }
 }
 
-extension QUICConnection {
+extension ConnectionCore {
     func handleRetireConnectionID(
         sequence: UInt64,
         packetDestinationID: QUICConnectionID,
@@ -209,7 +209,7 @@ extension QUICConnection {
     }
 }
 
-extension QUICConnection {
+extension ConnectionCore {
     func pathValidationTimeout() -> Nanoseconds {
         return 3 * Swift.max(self.pto(for: self.applicationSpace), self.initialPTO)
     }
@@ -275,7 +275,7 @@ extension QUICConnection {
     }
 }
 
-extension QUICConnection {
+extension ConnectionCore {
     func startPMTUD() {
         guard self.settings.isPMTUDEnabled,
               self.pathMTUDiscovery == nil,
@@ -299,8 +299,8 @@ extension QUICConnection {
     }
 }
 
-extension QUICConnection {
-    public func migrate(to path: QUICPath, immediately: Bool, now: QUICInstant) throws(QUICError) {
+extension ConnectionCore {
+    func migrate(to path: QUICPath, immediately: Bool, now: QUICInstant) throws(QUICError) {
         let now = self.updateTimestamp(now.nanoseconds)
         guard self.state == .established,
               self.isHandshakeConfirmed,

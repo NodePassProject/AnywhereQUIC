@@ -6,147 +6,15 @@
 //
 
 import Foundation
+import Synchronization
 
 public struct QUICOutgoingDatagram: Sendable {
     public var count: Int
     public var path: QUICPath
 }
 
-struct KeyUpdateState {
-    var currentPhase = false
-    var nextRead: PacketKeys?
-    var nextWrite: PacketKeys?
-    var oldRead: PacketKeys?
-    var isPending = false
-    var isInitiator = false
-    var confirmedAt: Nanoseconds = Time.never
-    var readFirstPacketNumber: UInt64 = 0
-    var writeFirstPacketNumber: UInt64 = 0
-    var encryptionCount: UInt64 = 0
-}
-
-public final class QUICConnection {
-    static let minimumPacketExpansion = 22
-    static let maxLocalConnectionIDs = 8
-    static let maxPendingPathResponses = 4
-    static let flowWindowRTTFactor: UInt64 = 2
-    static let flowWindowScalingFactor: UInt64 = 2
-    static let minimumCoalescedPayload = 128
-
-    enum HandshakePhase {
-        case initial
-        case waitingForHandshake
-    }
-
-    public let settings: QUICSettings
-    public internal(set) var localTransportParameters: QUICTransportParameters
-    public internal(set) var remoteTransportParameters: QUICTransportParameters?
-    public internal(set) var state: QUICConnectionState = .handshaking
-    public internal(set) var isHandshakeComplete = false
-    public internal(set) var isHandshakeConfirmed = false
-    public var keepAliveTimeout: Duration? {
-        didSet {
-            self.keepAliveTimeoutNanoseconds = Self.keepAliveTimeoutNanoseconds(for: self.keepAliveTimeout)
-        }
-    }
-
-    let tls: any QUICTLSProvider
-    var congestionController: any QUICCongestionController
-    let version = QUICVersion.v1
-
-    var handshakePhase: HandshakePhase = .initial
-    var isTLSHandshakeComplete = false
-    var isServerAddressVerified = false
-    var hasProcessedInitialPacket = false
-    var hasReceivedTransportParameters = false
-    var hasReceivedRetry = false
-    var shouldRestartIdleTimerOnWrite = false
-    var hasStartedHandshake = false
-    var crumblesInitialCrypto = true
-    var pcg = PCG32()
-
-    var initialSpace: PacketNumberSpace?
-    var handshakeSpace: PacketNumberSpace?
-    let applicationSpace = PacketNumberSpace(level: .application)
-
-    let originalDestinationID: QUICConnectionID
-    let originalSourceID: QUICConnectionID
-    var retrySourceID: QUICConnectionID?
-    var retryToken: [UInt8] = []
-    var localIDs: [LocalConnectionID]
-    var localLastSequence: UInt64 = 0
-    var localInFlightCount = 0
-    var localRetiredCount: Int { self.localIDs.filter(\.isRetired).count }
-    var active: ActivePath
-    var destinationIDs = DestinationIDTracker()
-
-    var pathValidation: PathValidation?
-    var pendingPathResponses: [(data: UInt64, path: QUICPath)] = []
-    var pathMTUDiscovery: PMTUDiscovery?
-
-    var keyUpdate = KeyUpdateState()
-    var decryptionFailures: UInt64 = 0
-    var shouldProcessBufferedHandshakePackets = false
-    var shouldProcessBufferedApplicationPackets = false
-
-    var streams: [QUICStreamID: Stream] = [:]
-    var streamSendQueue: [QUICStreamID] = []
-    var pendingDatagrams: [Data] = []
-    var localBidirectionalNextIndex: UInt64 = 0
-    var localUnidirectionalNextIndex: UInt64 = 0
-    var localBidirectionalMaxStreams: UInt64 = 0
-    var localUnidirectionalMaxStreams: UInt64 = 0
-    var remoteBidirectionalMaxStreams: UInt64
-    var remoteBidirectionalUnsentMaxStreams: UInt64
-    var remoteUnidirectionalMaxStreams: UInt64
-    var remoteUnidirectionalUnsentMaxStreams: UInt64
-    var remoteBidirectionalOpened = RangeSet()
-    var remoteUnidirectionalOpened = RangeSet()
-
-    var receiveOffset: UInt64 = 0
-    var receiveMaxOffset: UInt64
-    var receiveUnsentMaxOffset: UInt64
-    var receiveWindow: UInt64
-    var lastMaxDataSentAt: Nanoseconds = Time.never
-    var sendOffset: UInt64 = 0
-    var sendMaxOffset: UInt64 = 0
-    var sendLastBlockedOffset: UInt64 = .max
-
-    public internal(set) var congestionState: QUICCongestionState
-    var ptoCount = 0
-    var lossDetectionTimer: Nanoseconds = Time.never
-    var handshakeConfirmedAt: Nanoseconds = Time.never
-    var pacer = Pacer()
-    var deliveryRateSampler = DeliveryRateSampler()
-    var idleTimestamp: Nanoseconds
-    var keepAliveLastSentAt: Nanoseconds = Time.never
-    var keepAliveTimeoutNanoseconds: Nanoseconds
-    var isKeepAliveCancelled = false
-    let startTime: Nanoseconds
-    var latestTime: Nanoseconds
-
-    var closeReason: QUICConnectionCloseReason?
-    var pendingClose: (isApplication: Bool, errorCode: UInt64, frameType: FrameType, reason: String)?
-    var closePacket: [UInt8]?
-    var closePacketCount: UInt64 = 0
-    var closePacketPath: QUICPath?
-    var isCloseResendPending = false
-    var packetsSinceCloseResend = 0
-    var closeResendThreshold = 1
-    var closingEndsAt: Nanoseconds = Time.never
-
-    var events: [QUICEvent] = []
-    var eventsHead = 0
-
-    var decryptBuffer: [UInt8]
-    var headerScratch = [UInt8](repeating: 0, count: 128)
-
-    public internal(set) var packetsSent: UInt64 = 0
-    public internal(set) var packetsReceived: UInt64 = 0
-    public internal(set) var packetsLost: UInt64 = 0
-    public internal(set) var packetsDiscarded: UInt64 = 0
-    public internal(set) var bytesSent: UInt64 = 0
-    public internal(set) var bytesReceived: UInt64 = 0
+public final class QUICConnection: Sendable {
+    private let core: Mutex<ConnectionCore>
 
     public init(
         settings: QUICSettings = QUICSettings(),
@@ -154,257 +22,141 @@ public final class QUICConnection {
         destinationID: QUICConnectionID? = nil,
         sourceID: QUICConnectionID? = nil,
         path: QUICPath,
-        tls: any QUICTLSProvider,
-        congestionController: any QUICCongestionController = QUICNewRenoCongestionController(),
+        tls: sending any QUICTLSProvider,
+        congestionController: sending any QUICCongestionController = QUICNewRenoCongestionController(),
         now: QUICInstant
     ) {
-        var settings = settings
-        settings.maxSendUDPPayloadSize = Swift.min(
-            Swift.max(settings.maxSendUDPPayloadSize, QUICSettings.minimumUDPPayloadSize),
-            QUICSettings.maximumUDPPayloadSize
-        )
-        settings.localConnectionIDLength = Swift.min(
-            Swift.max(settings.localConnectionIDLength, 0),
-            QUICConnectionID.maxLength
-        )
-        settings.maxPendingDatagrams = Swift.max(0, settings.maxPendingDatagrams)
-        settings.maxStreamSendBufferSize = Swift.max(0, settings.maxStreamSendBufferSize)
-        self.settings = settings
-        self.tls = tls
-        self.congestionController = congestionController
-        let destinationID = destinationID ?? QUICConnectionID.random(length: 8)
-        precondition(
-            destinationID.count >= PacketHeader.minimumInitialDestinationIDLength,
-            "initial destination connection ID must be at least 8 bytes"
-        )
-        let sourceID = sourceID ?? QUICConnectionID.random(length: settings.localConnectionIDLength)
-        self.originalDestinationID = destinationID
-        self.originalSourceID = sourceID
-        var parameters = transportParameters
-        parameters.initialSourceConnectionID = sourceID
-        parameters.originalDestinationConnectionID = nil
-        parameters.retrySourceConnectionID = nil
-        parameters.statelessResetToken = nil
-        parameters.preferredAddress = nil
-        parameters.maxUDPPayloadSize = Swift.max(
-            parameters.maxUDPPayloadSize,
-            QUICTransportParameters.minimumMaxUDPPayloadSize
-        )
-        parameters.activeConnectionIDLimit = Swift.max(
-            parameters.activeConnectionIDLimit,
-            QUICTransportParameters.defaultActiveConnectionIDLimit
-        )
-        self.localTransportParameters = parameters
-        self.localIDs = [LocalConnectionID(id: sourceID, sequence: 0, token: .random())]
-        self.active = ActivePath(
-            connectionID: RemoteConnectionID(id: destinationID, sequence: 0, token: nil),
-            path: path,
-            isValidated: true,
-            maxUDPPayloadSize: QUICSettings.minimumUDPPayloadSize
-        )
-        self.remoteBidirectionalMaxStreams = parameters.initialMaxStreamsBidirectional
-        self.remoteBidirectionalUnsentMaxStreams = parameters.initialMaxStreamsBidirectional
-        self.remoteUnidirectionalMaxStreams = parameters.initialMaxStreamsUnidirectional
-        self.remoteUnidirectionalUnsentMaxStreams = parameters.initialMaxStreamsUnidirectional
-        self.receiveMaxOffset = parameters.initialMaxData
-        self.receiveUnsentMaxOffset = parameters.initialMaxData
-        self.receiveWindow = parameters.initialMaxData
-        let initialRTT = Swift.max(settings.initialRTT.clampedNanoseconds, Time.millisecond)
-        self.congestionState = QUICCongestionState(
-            initialRTT: initialRTT,
-            maxSendUDPPayloadSize: QUICSettings.minimumUDPPayloadSize
-        )
-        self.startTime = now.nanoseconds
-        self.latestTime = now.nanoseconds
-        self.idleTimestamp = now.nanoseconds
-        self.keepAliveTimeout = settings.keepAliveTimeout
-        self.keepAliveTimeoutNanoseconds = Self.keepAliveTimeoutNanoseconds(for: settings.keepAliveTimeout)
-        self.decryptBuffer = [UInt8](repeating: 0, count: Swift.max(settings.maxSendUDPPayloadSize, 1500))
-        let initial = PacketNumberSpace(level: .initial)
-        let keys = PacketKeys.initial(destinationID: destinationID, isClient: true)
-        initial.readKeys = keys.read
-        initial.writeKeys = keys.write
-        self.initialSpace = initial
-        self.handshakeSpace = PacketNumberSpace(level: .handshake)
-        congestionController.reset(state: &self.congestionState, now: now)
+        core = Mutex(ConnectionCore(
+            settings: settings, transportParameters: transportParameters,
+            destinationID: destinationID, sourceID: sourceID, path: path,
+            tls: tls, congestionController: congestionController, now: now
+        ))
     }
 
-    public var path: QUICPath { self.active.path }
+    public var settings: QUICSettings { core.withLock { $0.settings } }
+    public var localTransportParameters: QUICTransportParameters { core.withLock { $0.localTransportParameters } }
+    public var remoteTransportParameters: QUICTransportParameters? { core.withLock { $0.remoteTransportParameters } }
+    public var state: QUICConnectionState { core.withLock { $0.state } }
+    public var isHandshakeComplete: Bool { core.withLock { $0.isHandshakeComplete } }
+    public var isHandshakeConfirmed: Bool { core.withLock { $0.isHandshakeConfirmed } }
+    public var keepAliveTimeout: Duration? {
+        get { core.withLock { $0.keepAliveTimeout } }
+        set { core.withLock { $0.keepAliveTimeout = newValue } }
+    }
+    public var congestionState: QUICCongestionState { core.withLock { $0.congestionState } }
+    public var packetsSent: UInt64 { core.withLock { $0.packetsSent } }
+    public var packetsReceived: UInt64 { core.withLock { $0.packetsReceived } }
+    public var packetsLost: UInt64 { core.withLock { $0.packetsLost } }
+    public var packetsDiscarded: UInt64 { core.withLock { $0.packetsDiscarded } }
+    public var bytesSent: UInt64 { core.withLock { $0.bytesSent } }
+    public var bytesReceived: UInt64 { core.withLock { $0.bytesReceived } }
+    public var path: QUICPath { core.withLock { $0.path } }
+    public var destinationConnectionID: QUICConnectionID { core.withLock { $0.destinationConnectionID } }
+    public var sourceConnectionIDs: [QUICConnectionID] { core.withLock { $0.sourceConnectionIDs } }
+    public var negotiatedVersion: UInt32 { core.withLock { $0.negotiatedVersion } }
+    public var sendQuantum: Int { core.withLock { $0.sendQuantum } }
+    public var pathMaxSendUDPPayloadSize: Int { core.withLock { $0.pathMaxSendUDPPayloadSize } }
+    public var hasPendingEvents: Bool { core.withLock { $0.hasPendingEvents } }
+    public var nextTimeout: QUICInstant? { core.withLock { $0.nextTimeout } }
+    public var closeReasonIfClosed: QUICConnectionCloseReason? { core.withLock { $0.closeReasonIfClosed } }
+    public var maxDatagramPayloadSize: Int { core.withLock { $0.maxDatagramPayloadSize } }
+    public var pendingDatagramCount: Int { core.withLock { $0.pendingDatagramCount } }
+    public var availableBidirectionalStreams: UInt64 { core.withLock { $0.availableBidirectionalStreams } }
+    public var availableUnidirectionalStreams: UInt64 { core.withLock { $0.availableUnidirectionalStreams } }
+    public static let maximumPendingDatagrams = ConnectionCore.maximumPendingDatagrams
 
-    public var destinationConnectionID: QUICConnectionID { self.active.connectionID.id }
+    public func nextEvent() -> QUICEvent? { core.withLock { $0.nextEvent() } }
 
-    public var sourceConnectionIDs: [QUICConnectionID] { self.localIDs.filter { !$0.isRetired }.map(\.id) }
-
-    public var negotiatedVersion: UInt32 { self.version.rawValue }
-
-    public var sendQuantum: Int { self.congestionState.sendQuantum }
-
-    public var pathMaxSendUDPPayloadSize: Int {
-        var size = self.active.maxUDPPayloadSize
-        if let remote = self.remoteTransportParameters {
-            size = Swift.min(size, Int(Swift.min(remote.maxUDPPayloadSize, UInt64(Int.max))))
+    public func drainEvents() -> [QUICEvent] {
+        core.withLock { core in
+            let events = Array(core.events[core.eventsHead...])
+            core.events.removeAll(keepingCapacity: true)
+            core.eventsHead = 0
+            return events
         }
-        return Swift.min(size, self.settings.maxSendUDPPayloadSize)
     }
 
-    public func nextEvent() -> QUICEvent? {
-        guard self.eventsHead < self.events.count else {
-            if !self.events.isEmpty {
-                self.events.removeAll(keepingCapacity: true)
-                self.eventsHead = 0
-            }
-            return nil
-        }
-        let event = self.events[self.eventsHead]
-        self.eventsHead += 1
-        if self.eventsHead == self.events.count {
-            self.events.removeAll(keepingCapacity: true)
-            self.eventsHead = 0
-        }
-        return event
+    public func receive(_ datagram: Data, from path: QUICPath, now: QUICInstant) {
+        core.withLock { $0.receive(datagram, from: path, now: now) }
     }
-
-    public var hasPendingEvents: Bool { self.eventsHead < self.events.count }
-
-    func emit(_ event: QUICEvent) {
-        self.events.append(event)
+    public func receive(_ datagram: [UInt8], from path: QUICPath, now: QUICInstant) {
+        core.withLock { $0.receive(datagram, from: path, now: now) }
     }
-
+    public func receive(_ datagram: UnsafeRawBufferPointer, from path: QUICPath, now: QUICInstant) {
+        let bytes = BorrowedBytes(buffer: datagram)
+        core.withLock { $0.receive(bytes.buffer, from: path, now: now) }
+    }
+    public func write(into buffer: UnsafeMutableBufferPointer<UInt8>, now: QUICInstant) -> QUICOutgoingDatagram? {
+        let bytes = BorrowedOutput(buffer: buffer)
+        return core.withLock { $0.write(into: bytes.buffer, now: now) }
+    }
+    public func write(now: QUICInstant) -> (datagram: Data, path: QUICPath)? {
+        core.withLock { $0.write(now: now) }
+    }
+    public func finishWriting(now: QUICInstant) { core.withLock { $0.finishWriting(now: now) } }
+    public func handleTimeout(now: QUICInstant) { core.withLock { $0.handleTimeout(now: now) } }
+    public func close(applicationErrorCode: UInt64, reason: String = "", now: QUICInstant) {
+        core.withLock { $0.close(applicationErrorCode: applicationErrorCode, reason: reason, now: now) }
+    }
+    public func exportKeyingMaterial(label: String, context: Data, length: Int) throws -> Data {
+        try core.withLock { try $0.exportKeyingMaterial(label: label, context: context, length: length) }
+    }
     @discardableResult
-    func updateTimestamp(_ now: Nanoseconds) -> Nanoseconds {
-        if now > self.latestTime {
-            self.latestTime = now
-        }
-        return self.latestTime
+    public func cancelPendingMigration(now: QUICInstant) -> Bool {
+        core.withLock { $0.cancelPendingMigration(now: now) }
     }
-
-    var isClientInitiated: Bool { true }
-
-    func isLocalStream(_ id: QUICStreamID) -> Bool {
-        return id.isClientInitiated
+    public func migrate(to path: QUICPath, immediately: Bool, now: QUICInstant) throws(QUICError) {
+        try core.withLock { (core) throws(QUICError) in try core.migrate(to: path, immediately: immediately, now: now) }
     }
-
-    func pto(for space: PacketNumberSpace) -> Nanoseconds {
-        let maxACKDelay = space.isApplication ? self.peerMaxACKDelay : 0
-        return self.congestionState.pto(maxACKDelay: maxACKDelay)
-    }
-
-    var peerMaxACKDelay: Nanoseconds {
-        return self.remoteTransportParameters?.maxACKDelay.clampedNanoseconds ?? 0
-    }
-
-    var peerACKDelayExponent: UInt64 {
-        return self.remoteTransportParameters?.ackDelayExponent ?? QUICTransportParameters.defaultACKDelayExponent
-    }
-
-    var localMaxACKDelay: Nanoseconds {
-        return self.localTransportParameters.maxACKDelay.clampedNanoseconds
-    }
-
-    var initialPTO: Nanoseconds {
-        let initialRTT = self.congestionState.initialRTTNanoseconds
-        return initialRTT + Swift.max(4 * (initialRTT / 2), Recovery.granularity) + self.peerMaxACKDelay
-    }
-
-    func computeACKDelay() -> Nanoseconds {
-        return Swift.min(
-            self.localMaxACKDelay,
-            Swift.max(self.congestionState.smoothedRTTNanoseconds / 8, Time.nanosecond)
-        )
-    }
-
-    var minimumPacketLength: Int {
-        return self.originalSourceID.count + Self.minimumPacketExpansion
-    }
-
-    var isCongestionWindowExhausted: Bool {
-        return self.congestionState.bytesInFlight >= self.congestionState.congestionWindow
-    }
-
-    func space(for level: QUICEncryptionLevel) -> PacketNumberSpace? {
-        switch level {
-        case .initial:
-            return self.initialSpace
-        case .handshake:
-            return self.handshakeSpace
-        case .application:
-            return self.applicationSpace
+    public func setCongestionController(_ controller: sending any QUICCongestionController, now: QUICInstant) {
+        let replacement = Mutex<(any QUICCongestionController)?>(controller)
+        core.withLock { connection in
+            let owned = replacement.withLock { value -> sending (any QUICCongestionController) in
+                let owned = value!
+                value = nil
+                return owned
+            }
+            connection.setCongestionController(owned, now: now)
         }
     }
-
-    func restartIdleTimerOnRead(_ now: Nanoseconds) {
-        self.idleTimestamp = now
-        self.shouldRestartIdleTimerOnWrite = true
-    }
-
-    func restartIdleTimerOnWriteIfNeeded(_ now: Nanoseconds) {
-        guard self.shouldRestartIdleTimerOnWrite else {
-            return
-        }
-        self.idleTimestamp = now
-        self.shouldRestartIdleTimerOnWrite = false
-    }
-
-    static func keepAliveTimeoutNanoseconds(for timeout: Duration?) -> Nanoseconds {
-        guard let timeout else {
-            return Time.never
-        }
-        let nanoseconds = timeout.clampedNanoseconds
-        return nanoseconds == 0 ? Time.never : nanoseconds
-    }
-
-    func updateKeepAlive(_ now: Nanoseconds) {
-        self.keepAliveLastSentAt = now
-        self.isKeepAliveCancelled = false
-    }
-
-    var isKeepAliveEnabled: Bool {
-        return self.keepAliveLastSentAt != Time.never && self.keepAliveTimeoutNanoseconds != Time.never
-    }
-
-    func isKeepAliveExpired(_ now: Nanoseconds) -> Bool {
-        return self.isKeepAliveEnabled
-            && Time.elapsed(self.keepAliveLastSentAt, self.keepAliveTimeoutNanoseconds, now)
-    }
-
-    var keepAliveExpiry: Nanoseconds {
-        guard !self.isKeepAliveCancelled, self.isHandshakeComplete, self.isKeepAliveEnabled else {
-            return Time.never
-        }
-        return self.keepAliveLastSentAt.addingClamped(self.keepAliveTimeoutNanoseconds)
-    }
-
-    func cancelExpiredKeepAliveTimer(now: Nanoseconds) {
-        if !self.isKeepAliveCancelled, self.isKeepAliveExpired(now) {
-            self.isKeepAliveCancelled = true
-        }
-    }
-
-    func ensureDecryptBuffer(_ count: Int) {
-        if self.decryptBuffer.count < count {
-            self.decryptBuffer = [UInt8](repeating: 0, count: count)
-        }
-    }
-
-    func findLocalID(_ id: QUICConnectionID) -> Int? {
-        return self.localIDs.firstIndex { $0.id == id }
-    }
-
-    func verifyDestinationID(_ id: QUICConnectionID) -> Bool {
-        guard let index = self.findLocalID(id) else {
-            return false
-        }
-        self.localIDs[index].isUsed = true
-        return true
-    }
-
-    func isKnownPath(_ path: QUICPath) -> Bool {
-        if self.active.path == path {
+    @discardableResult
+    public func setBrutalBandwidth(_ bytesPerSecond: UInt64) -> Bool {
+        core.withLock {
+            guard let controller = $0.congestionController as? QUICBrutalCongestionController else { return false }
+            controller.bytesPerSecond = bytesPerSecond
             return true
         }
-        if let pathValidation = self.pathValidation, pathValidation.path == path {
-            return true
-        }
-        return self.destinationIDs.isRetiredPath(path)
+    }
+    public func openStream(bidirectional: Bool) throws(QUICError) -> QUICStreamID {
+        try core.withLock { (core) throws(QUICError) in try core.openStream(bidirectional: bidirectional) }
+    }
+    public func sendCapacity(on streamID: QUICStreamID) -> Int { core.withLock { $0.sendCapacity(on: streamID) } }
+    @discardableResult
+    public func send(_ data: Data, on streamID: QUICStreamID, fin: Bool = false) throws(QUICError) -> Int {
+        try core.withLock { (core) throws(QUICError) in try core.send(data, on: streamID, fin: fin) }
+    }
+    public func finishSending(on streamID: QUICStreamID) throws(QUICError) {
+        try core.withLock { (core) throws(QUICError) in try core.finishSending(on: streamID) }
+    }
+    public func resetStream(_ streamID: QUICStreamID, errorCode: UInt64) throws(QUICError) {
+        try core.withLock { (core) throws(QUICError) in try core.resetStream(streamID, errorCode: errorCode) }
+    }
+    public func stopSending(on streamID: QUICStreamID, errorCode: UInt64) throws(QUICError) {
+        try core.withLock { (core) throws(QUICError) in try core.stopSending(on: streamID, errorCode: errorCode) }
+    }
+    public func shutdownStream(_ streamID: QUICStreamID, errorCode: UInt64) {
+        core.withLock { $0.shutdownStream(streamID, errorCode: errorCode) }
+    }
+    public func extendReceiveWindow(for streamID: QUICStreamID, by count: Int) {
+        core.withLock { $0.extendReceiveWindow(for: streamID, by: count) }
+    }
+    public func sendDatagram(_ data: Data) throws(QUICError) {
+        try core.withLock { (core) throws(QUICError) in try core.sendDatagram(data) }
+    }
+    public func sendDatagrams(_ datagrams: [Data]) throws(QUICError) {
+        try core.withLock { (core) throws(QUICError) in try core.sendDatagrams(datagrams) }
     }
 }
+
+private struct BorrowedBytes: @unchecked Sendable { let buffer: UnsafeRawBufferPointer }
+private struct BorrowedOutput: @unchecked Sendable { let buffer: UnsafeMutableBufferPointer<UInt8> }

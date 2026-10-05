@@ -125,8 +125,8 @@ public struct QUICStatelessResetToken: Sendable {
     public static func random(using generator: inout some RandomNumberGenerator) -> QUICStatelessResetToken {
         var token = QUICStatelessResetToken()
         token.storage = (
-            UInt64.random(in: .min ... .max, using: &generator),
-            UInt64.random(in: .min ... .max, using: &generator)
+            generator.next(),
+            generator.next()
         )
         return token
     }

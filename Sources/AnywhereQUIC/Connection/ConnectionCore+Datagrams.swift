@@ -1,5 +1,5 @@
 //
-//  QUICConnection+Datagrams.swift
+//  ConnectionCore+Datagrams.swift
 //  AnywhereQUIC
 //
 //  Created by NodePassProject on 10/5/26.
@@ -7,10 +7,10 @@
 
 import Foundation
 
-extension QUICConnection {
-    public static let maximumPendingDatagrams = 256
+extension ConnectionCore {
+    static let maximumPendingDatagrams = 256
 
-    public var maxDatagramPayloadSize: Int {
+    var maxDatagramPayloadSize: Int {
         guard let remote = self.remoteTransportParameters, remote.maxDatagramFrameSize > 0 else {
             return 0
         }
@@ -29,13 +29,13 @@ extension QUICConnection {
         return payload
     }
 
-    public func sendDatagram(_ data: Data) throws(QUICError) {
+    func sendDatagram(_ data: Data) throws(QUICError) {
         try self.sendDatagrams([data])
     }
 
-    public var pendingDatagramCount: Int { self.pendingDatagrams.count }
+    var pendingDatagramCount: Int { self.pendingDatagrams.count }
 
-    public func sendDatagrams(_ datagrams: [Data]) throws(QUICError) {
+    func sendDatagrams(_ datagrams: [Data]) throws(QUICError) {
         guard !datagrams.isEmpty else {
             return
         }

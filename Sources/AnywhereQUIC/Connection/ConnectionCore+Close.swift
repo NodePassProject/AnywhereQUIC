@@ -1,5 +1,5 @@
 //
-//  QUICConnection+Close.swift
+//  ConnectionCore+Close.swift
 //  AnywhereQUIC
 //
 //  Created by NodePassProject on 10/5/26.
@@ -7,10 +7,10 @@
 
 import Foundation
 
-extension QUICConnection {
-    public var closeReasonIfClosed: QUICConnectionCloseReason? { self.closeReason }
+extension ConnectionCore {
+    var closeReasonIfClosed: QUICConnectionCloseReason? { self.closeReason }
 
-    public func close(applicationErrorCode: UInt64, reason: String = "", now: QUICInstant) {
+    func close(applicationErrorCode: UInt64, reason: String = "", now: QUICInstant) {
         let now = self.updateTimestamp(now.nanoseconds)
         guard self.state == .handshaking || self.state == .established else {
             return

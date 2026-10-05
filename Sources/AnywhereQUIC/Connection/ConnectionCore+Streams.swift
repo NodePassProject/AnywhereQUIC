@@ -1,5 +1,5 @@
 //
-//  QUICConnection+Streams.swift
+//  ConnectionCore+Streams.swift
 //  AnywhereQUIC
 //
 //  Created by NodePassProject on 10/5/26.
@@ -7,8 +7,8 @@
 
 import Foundation
 
-extension QUICConnection {
-    public func openStream(bidirectional: Bool) throws(QUICError) -> QUICStreamID {
+extension ConnectionCore {
+    func openStream(bidirectional: Bool) throws(QUICError) -> QUICStreamID {
         guard self.state == .handshaking || self.state == .established,
               let remote = self.remoteTransportParameters else {
             throw QUICError.invalidState
@@ -49,17 +49,17 @@ extension QUICConnection {
         return id
     }
 
-    public var availableBidirectionalStreams: UInt64 {
+    var availableBidirectionalStreams: UInt64 {
         return self.localBidirectionalNextIndex >= self.localBidirectionalMaxStreams
             ? 0 : self.localBidirectionalMaxStreams - self.localBidirectionalNextIndex
     }
 
-    public var availableUnidirectionalStreams: UInt64 {
+    var availableUnidirectionalStreams: UInt64 {
         return self.localUnidirectionalNextIndex >= self.localUnidirectionalMaxStreams
             ? 0 : self.localUnidirectionalMaxStreams - self.localUnidirectionalNextIndex
     }
 
-    public func sendCapacity(on streamID: QUICStreamID) -> Int {
+    func sendCapacity(on streamID: QUICStreamID) -> Int {
         guard let stream = self.streams[streamID], let send = stream.send, !stream.isWriteClosed, !send.hasFIN else {
             return 0
         }
@@ -74,7 +74,7 @@ extension QUICConnection {
     }
 
     @discardableResult
-    public func send(_ data: Data, on streamID: QUICStreamID, fin: Bool = false) throws(QUICError) -> Int {
+    func send(_ data: Data, on streamID: QUICStreamID, fin: Bool = false) throws(QUICError) -> Int {
         guard self.state == .handshaking || self.state == .established else {
             throw QUICError.invalidState
         }
@@ -100,11 +100,11 @@ extension QUICConnection {
         return accepted
     }
 
-    public func finishSending(on streamID: QUICStreamID) throws(QUICError) {
+    func finishSending(on streamID: QUICStreamID) throws(QUICError) {
         try self.send(Data(), on: streamID, fin: true)
     }
 
-    public func resetStream(_ streamID: QUICStreamID, errorCode: UInt64) throws(QUICError) {
+    func resetStream(_ streamID: QUICStreamID, errorCode: UInt64) throws(QUICError) {
         guard let stream = self.streams[streamID] else {
             throw QUICError.streamNotFound
         }
@@ -114,7 +114,7 @@ extension QUICConnection {
         self.shutdownWrite(of: stream, errorCode: errorCode)
     }
 
-    public func stopSending(on streamID: QUICStreamID, errorCode: UInt64) throws(QUICError) {
+    func stopSending(on streamID: QUICStreamID, errorCode: UInt64) throws(QUICError) {
         guard let stream = self.streams[streamID] else {
             throw QUICError.streamNotFound
         }
@@ -124,7 +124,7 @@ extension QUICConnection {
         self.shutdownRead(of: stream, errorCode: errorCode)
     }
 
-    public func shutdownStream(_ streamID: QUICStreamID, errorCode: UInt64) {
+    func shutdownStream(_ streamID: QUICStreamID, errorCode: UInt64) {
         guard let stream = self.streams[streamID] else {
             return
         }
@@ -136,7 +136,7 @@ extension QUICConnection {
         }
     }
 
-    public func extendReceiveWindow(for streamID: QUICStreamID, by count: Int) {
+    func extendReceiveWindow(for streamID: QUICStreamID, by count: Int) {
         guard count > 0 else {
             return
         }

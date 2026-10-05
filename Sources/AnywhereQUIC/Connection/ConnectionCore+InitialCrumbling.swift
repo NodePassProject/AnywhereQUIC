@@ -1,11 +1,11 @@
 //
-//  QUICConnection+InitialCrumbling.swift
+//  ConnectionCore+InitialCrumbling.swift
 //  AnywhereQUIC
 //
 //  Created by NodePassProject on 10/5/26.
 //
 
-extension QUICConnection {
+extension ConnectionCore {
     func crumbleInitialCrypto(
         space: PacketNumberSpace,
         left: Int,

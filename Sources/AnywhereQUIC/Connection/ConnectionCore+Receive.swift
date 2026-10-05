@@ -1,5 +1,5 @@
 //
-//  QUICConnection+Receive.swift
+//  ConnectionCore+Receive.swift
 //  AnywhereQUIC
 //
 //  Created by NodePassProject on 10/5/26.
@@ -7,7 +7,7 @@
 
 import Foundation
 
-extension QUICConnection {
+extension ConnectionCore {
     enum PacketOutcome {
         case consumed(Int)
         case discarded
@@ -15,15 +15,15 @@ extension QUICConnection {
         case stop
     }
 
-    public func receive(_ datagram: Data, from path: QUICPath, now: QUICInstant) {
+    func receive(_ datagram: Data, from path: QUICPath, now: QUICInstant) {
         datagram.withUnsafeBytes { self.receive($0, from: path, now: now) }
     }
 
-    public func receive(_ datagram: [UInt8], from path: QUICPath, now: QUICInstant) {
+    func receive(_ datagram: [UInt8], from path: QUICPath, now: QUICInstant) {
         datagram.withUnsafeBytes { self.receive($0, from: path, now: now) }
     }
 
-    public func receive(_ datagram: UnsafeRawBufferPointer, from path: QUICPath, now: QUICInstant) {
+    func receive(_ datagram: UnsafeRawBufferPointer, from path: QUICPath, now: QUICInstant) {
         let now = self.updateTimestamp(now.nanoseconds)
         guard !datagram.isEmpty else {
             return
