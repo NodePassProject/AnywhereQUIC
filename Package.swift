@@ -1,12 +1,5 @@
 // swift-tools-version: 6.4
 
-//
-//  Package.swift
-//  AnywhereQUIC
-//
-//  Created by NodePassProject on 10/6/26.
-//
-
 import PackageDescription
 
 let package = Package(
