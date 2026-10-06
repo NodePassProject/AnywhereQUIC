@@ -15,6 +15,13 @@ struct FIFOQueue<Element> {
 
     var first: Element? { self.isEmpty ? nil : self.storage[self.head] }
 
+    func contains(where predicate: (Element) throws -> Bool) rethrows -> Bool {
+        for index in self.head..<self.storage.count where try predicate(self.storage[index]!) {
+            return true
+        }
+        return false
+    }
+
     mutating func append(_ element: Element) {
         self.storage.append(element)
     }

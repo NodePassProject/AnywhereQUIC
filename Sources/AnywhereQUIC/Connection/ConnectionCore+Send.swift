@@ -1103,7 +1103,7 @@ extension ConnectionCore {
             inFlight: self.congestionState.bytesInFlight,
             size: length,
             applicationLimited: self.isHandshakeComplete && self.pendingDatagrams.isEmpty
-                && !self.streams.values.contains(where: { $0.hasPendingSendData })
+                && !self.hasPendingStreamData
         )
         space.sent.add(packet, state: &self.congestionState)
         self.congestionController.onPacketSent(
@@ -1115,6 +1115,13 @@ extension ConnectionCore {
             space.lastSentAt = now
         }
         self.setLossDetectionTimer(now: now)
+    }
+
+    /// Every stream with pending send data is queued, so only `streamSendQueue` needs scanning.
+    private var hasPendingStreamData: Bool {
+        let hasPending = self.streamSendQueue.contains { self.streams[$0]?.hasPendingSendData == true }
+        assert(hasPending == self.streams.values.contains { $0.hasPendingSendData })
+        return hasPending
     }
 
     private func finishPacket(space: PacketNumberSpace, length: Int, isACKEliciting: Bool, now: Nanoseconds) {

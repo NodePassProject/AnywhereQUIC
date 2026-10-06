@@ -20,5 +20,9 @@ let package = Package(
         .target(
             name: "AnywhereQUIC"
         ),
+        .testTarget(
+            name: "AnywhereQUICTests",
+            dependencies: ["AnywhereQUIC"]
+        ),
     ]
 )

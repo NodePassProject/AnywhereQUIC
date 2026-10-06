@@ -86,7 +86,7 @@ final class ConnectionCore {
     var shouldProcessBufferedApplicationPackets = false
 
     var streams: [QUICStreamID: Stream] = [:]
-    var streamSendQueue: [QUICStreamID] = []
+    var streamSendQueue = FIFOQueue<QUICStreamID>()
     var pendingDatagrams = FIFOQueue<Data>()
     var localBidirectionalNextIndex: UInt64 = 0
     var localUnidirectionalNextIndex: UInt64 = 0

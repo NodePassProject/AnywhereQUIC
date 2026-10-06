@@ -196,8 +196,8 @@ extension ConnectionCore {
         guard stream.isQueued else {
             return
         }
+        // The ID stays in `streamSendQueue`; `writeStreamFrames` drops IDs whose stream is gone.
         stream.isQueued = false
-        self.streamSendQueue.removeAll { $0 == stream.id }
     }
 
     func closeStreamIfDone(_ stream: Stream) {
