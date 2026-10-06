@@ -57,6 +57,7 @@ final class ConnectionCore {
     var hasReceivedRetry = false
     var shouldRestartIdleTimerOnWrite = false
     var hasStartedHandshake = false
+    var isAwaitingPeerVerification = false
     var crumblesInitialCrypto = true
     var pcg = PCG32()
 
@@ -86,7 +87,7 @@ final class ConnectionCore {
 
     var streams: [QUICStreamID: Stream] = [:]
     var streamSendQueue: [QUICStreamID] = []
-    var pendingDatagrams: [Data] = []
+    var pendingDatagrams = FIFOQueue<Data>()
     var localBidirectionalNextIndex: UInt64 = 0
     var localUnidirectionalNextIndex: UInt64 = 0
     var localBidirectionalMaxStreams: UInt64 = 0
@@ -260,6 +261,15 @@ final class ConnectionCore {
     }
 
     var hasPendingEvents: Bool { self.eventsHead < self.events.count }
+
+    func drainEvents(into buffer: inout [QUICEvent]) {
+        buffer.removeAll(keepingCapacity: true)
+        if self.eventsHead > 0 {
+            self.events.removeFirst(self.eventsHead)
+            self.eventsHead = 0
+        }
+        swap(&self.events, &buffer)
+    }
 
     func emit(_ event: QUICEvent) {
         self.events.append(event)

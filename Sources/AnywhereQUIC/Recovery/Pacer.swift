@@ -10,8 +10,6 @@ struct Pacer {
     private(set) var pendingBytes = 0
     private var compensation: Nanoseconds = 0
 
-    var isBlocked: Bool { self.nextSendTime != Time.never }
-
     func allowsSending(at now: Nanoseconds) -> Bool {
         return self.nextSendTime == Time.never || self.nextSendTime <= now
     }
@@ -26,23 +24,11 @@ struct Pacer {
         self.nextSendTime = Time.never
     }
 
-    mutating func claim(at now: Nanoseconds) -> Bool {
-        if self.nextSendTime == Time.never {
-            return true
-        }
-        if self.nextSendTime > now {
-            return false
-        }
-        self.compensation = self.compensation.addingClamped(now - self.nextSendTime)
-        self.nextSendTime = Time.never
-        return true
-    }
-
     mutating func recordSent(bytes: Int) {
         self.pendingBytes += bytes
     }
 
-    mutating func finishBatch(now: Nanoseconds, pacingRate: UInt64) {
+    mutating func finishBatch(now: Nanoseconds, pacingRate: UInt64, sendQuantum: Int) {
         guard self.pendingBytes > 0 else {
             return
         }
@@ -50,7 +36,7 @@ struct Pacer {
             self.pendingBytes = 0
         }
         guard pacingRate > 0 else {
-            self.nextSendTime = Time.never
+            self.nextSendTime = self.pendingBytes >= sendQuantum ? now : Time.never
             return
         }
         let wait = UInt64(self.pendingBytes).multipliedFullWidth(by: Time.second)

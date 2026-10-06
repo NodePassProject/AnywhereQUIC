@@ -68,12 +68,13 @@ public final class QUICConnection: Sendable {
     public func nextEvent() -> QUICEvent? { core.withLock { $0.nextEvent() } }
 
     public func drainEvents() -> [QUICEvent] {
-        core.withLock { core in
-            let events = Array(core.events[core.eventsHead...])
-            core.events.removeAll(keepingCapacity: true)
-            core.eventsHead = 0
-            return events
-        }
+        var events: [QUICEvent] = []
+        drainEvents(into: &events)
+        return events
+    }
+
+    public func drainEvents(into events: inout [QUICEvent]) {
+        core.withLock { $0.drainEvents(into: &events) }
     }
 
     public func receive(_ datagram: Data, from path: QUICPath, now: QUICInstant) {
@@ -97,6 +98,9 @@ public final class QUICConnection: Sendable {
     public func handleTimeout(now: QUICInstant) { core.withLock { $0.handleTimeout(now: now) } }
     public func close(applicationErrorCode: UInt64, reason: String = "", now: QUICInstant) {
         core.withLock { $0.close(applicationErrorCode: applicationErrorCode, reason: reason, now: now) }
+    }
+    public func completePeerVerification(error: (any Error)?, now: QUICInstant) throws(QUICError) {
+        try core.withLock { (core) throws(QUICError) in try core.completePeerVerification(error: error, now: now) }
     }
     public func exportKeyingMaterial(label: String, context: Data, length: Int) throws -> Data {
         try core.withLock { try $0.exportKeyingMaterial(label: label, context: context, length: length) }

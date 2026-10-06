@@ -61,10 +61,37 @@ extension ConnectionCore {
                 self.shouldProcessBufferedApplicationPackets = true
             case .setRemoteTransportParameters(let data):
                 try self.setRemoteTransportParameters(Array(data))
+            case .verifyPeer(let certificates):
+                self.isAwaitingPeerVerification = true
+                self.emit(.peerVerificationRequested(certificates: certificates))
             case .handshakeComplete:
                 try self.completeTLSHandshake(now: now)
             }
         }
+    }
+
+    func completePeerVerification(error: (any Error)?, now: QUICInstant) throws(QUICError) {
+        let now = self.updateTimestamp(now.nanoseconds)
+        guard self.state == .handshaking, self.isAwaitingPeerVerification else {
+            throw QUICError.invalidState
+        }
+        self.isAwaitingPeerVerification = false
+        do {
+            try self.resumeHandshake(afterPeerVerification: error, now: now)
+        } catch {
+            self.closeLocally(error, now: now)
+        }
+    }
+
+    private func resumeHandshake(afterPeerVerification failure: (any Error)?, now: Nanoseconds) throws(TransportError) {
+        let actions: [QUICHandshakeAction]
+        do {
+            actions = try self.tls.completePeerVerification(error: failure)
+        } catch {
+            throw self.tlsFailure(error)
+        }
+        try self.applyHandshakeActions(actions, now: now)
+        try self.drainBufferedPackets(now: now)
     }
 
     func setRemoteTransportParameters(_ bytes: [UInt8]) throws(TransportError) {

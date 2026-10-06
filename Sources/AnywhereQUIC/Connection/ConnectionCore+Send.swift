@@ -55,6 +55,10 @@ extension ConnectionCore {
         return (Data(storage.prefix(result.count)), result.path)
     }
 
+    private func allowsPacedSending(at now: Nanoseconds) -> Bool {
+        return self.pacer.allowsSending(at: now) && self.pacer.pendingBytes < self.congestionState.sendQuantum
+    }
+
     var isPacketNumberExhausted: Bool {
         return (self.initialSpace?.nextPacketNumber ?? 0) > PacketNumber.max
             || (self.handshakeSpace?.nextPacketNumber ?? 0) > PacketNumber.max
@@ -73,7 +77,7 @@ extension ConnectionCore {
         var written = 0
         var requirePadding = false
         if self.state == .handshaking {
-            guard self.pacer.allowsSending(at: now) else {
+            guard self.allowsPacedSending(at: now) else {
                 let count = try self.writeHandshakeACKPackets(into: destination, now: now)
                 return count > 0 ? QUICOutgoingDatagram(count: count, path: self.active.path) : nil
             }
@@ -88,7 +92,7 @@ extension ConnectionCore {
                 written = count
             }
         } else {
-            guard self.pacer.allowsSending(at: now) else {
+            guard self.allowsPacedSending(at: now) else {
                 let count = try self.writeACKOnlyPacket(space: self.applicationSpace, into: destination, now: now)
                 return count > 0 ? QUICOutgoingDatagram(count: count, path: self.active.path) : nil
             }

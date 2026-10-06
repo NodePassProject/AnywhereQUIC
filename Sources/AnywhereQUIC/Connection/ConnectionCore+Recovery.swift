@@ -554,6 +554,10 @@ extension ConnectionCore {
 
     func finishWriting(now: QUICInstant) {
         let now = self.updateTimestamp(now.nanoseconds)
-        self.pacer.finishBatch(now: now, pacingRate: self.congestionState.pacingRate)
+        self.pacer.finishBatch(
+            now: now,
+            pacingRate: self.congestionState.pacingRate,
+            sendQuantum: self.congestionState.sendQuantum
+        )
     }
 }

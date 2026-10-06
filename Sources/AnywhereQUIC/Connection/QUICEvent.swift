@@ -9,6 +9,7 @@ import Foundation
 
 public enum QUICEvent: Sendable {
     case datagramReceived(Data)
+    case peerVerificationRequested(certificates: [Data])
     case handshakeCompleted
     case handshakeConfirmed
     case streamOpened(QUICStreamID)
