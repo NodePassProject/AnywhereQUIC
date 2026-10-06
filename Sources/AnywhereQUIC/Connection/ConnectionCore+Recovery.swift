@@ -8,16 +8,14 @@
 import Foundation
 
 extension ConnectionCore {
-    var allSpaces: [PacketNumberSpace] {
-        var spaces: [PacketNumberSpace] = []
+    func forEachSpace(_ body: (PacketNumberSpace) -> Void) {
         if let initialSpace = self.initialSpace {
-            spaces.append(initialSpace)
+            body(initialSpace)
         }
         if let handshakeSpace = self.handshakeSpace {
-            spaces.append(handshakeSpace)
+            body(handshakeSpace)
         }
-        spaces.append(self.applicationSpace)
-        return spaces
+        body(self.applicationSpace)
     }
 
     func handleACK(
@@ -293,9 +291,11 @@ extension ConnectionCore {
     func earliestLossTime() -> (time: Nanoseconds, space: PacketNumberSpace?) {
         var earliest: Nanoseconds = Time.never
         var result: PacketNumberSpace?
-        for space in self.allSpaces where space.sent.lossTime < earliest {
-            earliest = space.sent.lossTime
-            result = space
+        self.forEachSpace { space in
+            if space.sent.lossTime < earliest {
+                earliest = space.sent.lossTime
+                result = space
+            }
         }
         return (earliest, result)
     }
@@ -324,12 +324,12 @@ extension ConnectionCore {
             ? Nanoseconds.max
             : base.multipliedReportingOverflow(by: 1 << UInt64(self.ptoCount)).partialValue
         var earliest: Nanoseconds = Time.never
-        for space in self.allSpaces {
+        self.forEachSpace { space in
             guard space.sent.ptoElicitingCount > 0, space.lastSentAt != Time.never else {
-                continue
+                return
             }
             if space.isApplication, !self.isHandshakeConfirmed {
-                continue
+                return
             }
             var expiry = space.lastSentAt.addingClamped(duration)
             if space.isApplication {
@@ -397,7 +397,7 @@ extension ConnectionCore {
         self.deliveryRateSampler = DeliveryRateSampler()
         self.congestionState.resetCongestion()
         self.congestionController.reset(state: &self.congestionState, now: QUICInstant(nanoseconds: now))
-        for space in self.allSpaces {
+        self.forEachSpace { space in
             space.sent.resetCongestionState(nextPacketNumber: space.nextPacketNumber)
         }
         self.pacer.reset()
@@ -427,7 +427,7 @@ extension ConnectionCore {
 
     func idleExpiry() -> Nanoseconds {
         let local = self.localTransportParameters.maxIdleTimeout.clampedNanoseconds
-        let remote = self.remoteTransportParameters?.maxIdleTimeout.clampedNanoseconds ?? 0
+        let remote = self.peerMaxIdleTimeout
         var timeout: Nanoseconds
         if !self.isTLSHandshakeComplete || remote == 0 || (local != 0 && local < remote) {
             timeout = local

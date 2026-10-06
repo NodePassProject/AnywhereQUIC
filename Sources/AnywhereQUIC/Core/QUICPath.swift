@@ -91,6 +91,9 @@ public struct QUICSocketAddress: Sendable {
 
 extension QUICSocketAddress: Hashable {
     public static func == (lhs: QUICSocketAddress, rhs: QUICSocketAddress) -> Bool {
+        if lhs.bytes == rhs.bytes {
+            return true
+        }
         guard let ranges = lhs.comparedRanges, let other = rhs.comparedRanges else {
             return lhs.bytes == rhs.bytes
         }

@@ -11,13 +11,13 @@ extension ConnectionCore {
     static let maximumPendingDatagrams = 256
 
     var maxDatagramPayloadSize: Int {
-        guard let remote = self.remoteTransportParameters, remote.maxDatagramFrameSize > 0 else {
+        guard self.peerMaxDatagramFrameSize > 0 else {
             return 0
         }
         let packetOverhead = 1 + self.active.connectionID.id.count + 4 + AEADAlgorithm.tagLength
         let frameLimit = Swift.min(
             UInt64(Swift.max(0, self.pathMaxSendUDPPayloadSize - packetOverhead)),
-            remote.maxDatagramFrameSize
+            self.peerMaxDatagramFrameSize
         )
         guard frameLimit >= 2 else {
             return 0
@@ -42,13 +42,13 @@ extension ConnectionCore {
         guard self.state == .established else {
             throw QUICError.invalidState
         }
-        guard let remote = self.remoteTransportParameters, remote.maxDatagramFrameSize > 0 else {
+        guard self.peerMaxDatagramFrameSize > 0 else {
             throw QUICError.datagramUnsupported
         }
         let limit = self.maxDatagramPayloadSize
         for data in datagrams {
             guard data.count <= limit,
-                  UInt64(1 + VarInt.encodedLength(UInt64(data.count)) + data.count) <= remote.maxDatagramFrameSize else {
+                  UInt64(1 + VarInt.encodedLength(UInt64(data.count)) + data.count) <= self.peerMaxDatagramFrameSize else {
                 throw QUICError.datagramTooLarge
             }
         }
@@ -59,8 +59,9 @@ extension ConnectionCore {
     }
 
     func writeDatagramFrames(builder: inout PacketBuilder, flags: inout PacketFlags) {
+        let limit = self.maxDatagramPayloadSize
         while let data = self.pendingDatagrams.first {
-            guard data.count <= self.maxDatagramPayloadSize else {
+            guard data.count <= limit else {
                 self.pendingDatagrams.removeFirst()
                 continue
             }

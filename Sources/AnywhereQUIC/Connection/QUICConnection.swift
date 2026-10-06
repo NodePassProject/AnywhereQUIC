@@ -151,7 +151,8 @@ public final class QUICConnection: Sendable {
     public func shutdownStream(_ streamID: QUICStreamID, errorCode: UInt64) {
         core.withLock { $0.shutdownStream(streamID, errorCode: errorCode) }
     }
-    public func extendReceiveWindow(for streamID: QUICStreamID, by count: Int) {
+    @discardableResult
+    public func extendReceiveWindow(for streamID: QUICStreamID, by count: Int) -> Bool {
         core.withLock { $0.extendReceiveWindow(for: streamID, by: count) }
     }
     public func sendDatagram(_ data: Data) throws(QUICError) {

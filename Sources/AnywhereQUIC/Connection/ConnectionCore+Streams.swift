@@ -136,10 +136,12 @@ extension ConnectionCore {
         }
     }
 
-    func extendReceiveWindow(for streamID: QUICStreamID, by count: Int) {
+    @discardableResult
+    func extendReceiveWindow(for streamID: QUICStreamID, by count: Int) -> Bool {
         guard count > 0 else {
-            return
+            return false
         }
+        var isStreamUpdateDue = false
         if let stream = self.streams[streamID], stream.receive != nil {
             stream.receiveUnsentMaxOffset = Swift.min(
                 stream.receiveUnsentMaxOffset.addingClamped(UInt64(count)),
@@ -147,9 +149,11 @@ extension ConnectionCore {
             )
             if stream.shouldSendMaxStreamData() {
                 self.enqueueStream(stream)
+                isStreamUpdateDue = true
             }
         }
         self.extendConnectionReceiveWindow(by: UInt64(count))
+        return isStreamUpdateDue || self.shouldSendMaxData
     }
 
     func extendConnectionReceiveWindow(by count: UInt64) {

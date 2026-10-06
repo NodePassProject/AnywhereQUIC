@@ -103,8 +103,7 @@ struct ACKTracker {
             self.commitACK()
             return nil
         }
-        var ranges = self.received.ranges
-        ranges.reverse()
+        let ranges = self.received.ranges.reversed()
         var frame = ACKFrame(
             largestAcknowledged: largestReceived,
             ackDelay: 0,
@@ -112,14 +111,13 @@ struct ACKTracker {
             additionalRanges: [],
             ecnCounts: nil
         )
-        let first = ranges.removeFirst()
-        if first.upperBound >= largestReceived {
+        var remaining = ranges[...]
+        if let first = remaining.first, first.upperBound >= largestReceived {
             frame.firstRange = largestReceived - first.lowerBound
-        } else {
-            ranges.insert(first, at: 0)
+            remaining = remaining.dropFirst()
         }
         var smallest = largestReceived - frame.firstRange
-        for range in ranges.prefix(ACKFrame.maxRanges) {
+        for range in remaining.prefix(ACKFrame.maxRanges) {
             let largest = range.upperBound - 1
             guard smallest >= largest + 2 else {
                 continue

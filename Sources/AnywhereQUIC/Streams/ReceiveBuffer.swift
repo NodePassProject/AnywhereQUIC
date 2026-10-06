@@ -41,7 +41,7 @@ struct ReceiveBuffer {
         if start == self.readOffset {
             self.readOffset = end
             guard self.hasPendingData, self.pending[self.pendingHead].offset <= end else {
-                return Data(bytes)
+                return bytes.isEmpty ? Data() : Data(bytes: bytes.baseAddress!, count: bytes.count)
             }
             var delivered = Data(capacity: bytes.count + self.deliverableBufferedBytes())
             bytes.withMemoryRebound(to: UInt8.self) { delivered.append($0) }

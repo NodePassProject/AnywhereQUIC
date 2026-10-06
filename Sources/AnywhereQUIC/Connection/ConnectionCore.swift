@@ -35,7 +35,23 @@ final class ConnectionCore {
 
     let settings: QUICSettings
     var localTransportParameters: QUICTransportParameters
-    var remoteTransportParameters: QUICTransportParameters?
+    var remoteTransportParameters: QUICTransportParameters? {
+        didSet {
+            let remote = self.remoteTransportParameters
+            self.peerMaxUDPPayloadSize = remote.map { Int(Swift.min($0.maxUDPPayloadSize, UInt64(Int.max))) } ?? Int.max
+            self.peerMaxACKDelay = remote?.maxACKDelay.clampedNanoseconds ?? 0
+            self.peerACKDelayExponent = remote?.ackDelayExponent ?? QUICTransportParameters.defaultACKDelayExponent
+            self.peerMaxIdleTimeout = remote?.maxIdleTimeout.clampedNanoseconds ?? 0
+            self.peerMaxDatagramFrameSize = remote?.maxDatagramFrameSize ?? 0
+            self.peerActiveConnectionIDLimit = remote?.activeConnectionIDLimit ?? 0
+        }
+    }
+    private(set) var peerMaxUDPPayloadSize = Int.max
+    private(set) var peerMaxACKDelay: Nanoseconds = 0
+    private(set) var peerACKDelayExponent = QUICTransportParameters.defaultACKDelayExponent
+    private(set) var peerMaxIdleTimeout: Nanoseconds = 0
+    private(set) var peerMaxDatagramFrameSize: UInt64 = 0
+    private(set) var peerActiveConnectionIDLimit: UInt64 = 0
     var state: QUICConnectionState = .handshaking
     var isHandshakeComplete = false
     var isHandshakeConfirmed = false
@@ -72,7 +88,7 @@ final class ConnectionCore {
     var localIDs: [LocalConnectionID]
     var localLastSequence: UInt64 = 0
     var localInFlightCount = 0
-    var localRetiredCount: Int { self.localIDs.filter(\.isRetired).count }
+    var localRetiredCount: Int { self.localIDs.reduce(0) { $1.isRetired ? $0 + 1 : $0 } }
     var active: ActivePath
     var destinationIDs = DestinationIDTracker()
 
@@ -236,11 +252,7 @@ final class ConnectionCore {
     var sendQuantum: Int { self.congestionState.sendQuantum }
 
     var pathMaxSendUDPPayloadSize: Int {
-        var size = self.active.maxUDPPayloadSize
-        if let remote = self.remoteTransportParameters {
-            size = Swift.min(size, Int(Swift.min(remote.maxUDPPayloadSize, UInt64(Int.max))))
-        }
-        return Swift.min(size, self.settings.maxSendUDPPayloadSize)
+        return Swift.min(self.active.maxUDPPayloadSize, self.peerMaxUDPPayloadSize, self.settings.maxSendUDPPayloadSize)
     }
 
     func nextEvent() -> QUICEvent? {
@@ -292,14 +304,6 @@ final class ConnectionCore {
     func pto(for space: PacketNumberSpace) -> Nanoseconds {
         let maxACKDelay = space.isApplication ? self.peerMaxACKDelay : 0
         return self.congestionState.pto(maxACKDelay: maxACKDelay)
-    }
-
-    var peerMaxACKDelay: Nanoseconds {
-        return self.remoteTransportParameters?.maxACKDelay.clampedNanoseconds ?? 0
-    }
-
-    var peerACKDelayExponent: UInt64 {
-        return self.remoteTransportParameters?.ackDelayExponent ?? QUICTransportParameters.defaultACKDelayExponent
     }
 
     var localMaxACKDelay: Nanoseconds {

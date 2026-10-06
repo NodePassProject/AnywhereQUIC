@@ -175,7 +175,7 @@ extension ConnectionCore {
     }
 
     func enqueueNewConnectionIDsIfNeeded() {
-        guard !self.originalSourceID.isEmpty, let remote = self.remoteTransportParameters else {
+        guard !self.originalSourceID.isEmpty, self.remoteTransportParameters != nil else {
             return
         }
         let count = self.localIDs.count
@@ -188,7 +188,7 @@ extension ConnectionCore {
         }
         let target = Int(Swift.min(
             UInt64(Self.maxLocalConnectionIDs),
-            remote.activeConnectionIDLimit + UInt64(self.localRetiredCount)
+            self.peerActiveConnectionIDLimit + UInt64(self.localRetiredCount)
         ))
         guard target > count else {
             return

@@ -14,7 +14,7 @@ The driver is the single context that runs these sequences, one at a time:
 
 Two drivers interleaving would split events between them, so stream data could be handed out on two threads out of order, and their packets would be counted as one pacing batch.
 
-Other threads may call self-contained methods at any time: `openStream`, `send(_:on:fin:)`, `finishSending`, `resetStream`, `stopSending`, `shutdownStream`, `extendReceiveWindow`, `sendDatagram`, `sendDatagrams`, `close`, `migrate`, `cancelPendingMigration`, `setCongestionController`, `setBrutalBandwidth` and the read-only properties. Their effects are picked up by the driver's next write sequence, so the caller should wake the driver afterwards.
+Other threads may call self-contained methods at any time: `openStream`, `send(_:on:fin:)`, `finishSending`, `resetStream`, `stopSending`, `shutdownStream`, `extendReceiveWindow`, `sendDatagram`, `sendDatagrams`, `close`, `migrate`, `cancelPendingMigration`, `setCongestionController`, `setBrutalBandwidth` and the read-only properties. Their effects are picked up by the driver's next write sequence, so the caller should wake the driver afterwards. `extendReceiveWindow` is the exception: it returns `true` only when a `MAX_STREAM_DATA` or `MAX_DATA` update is due, and the driver needs waking only then.
 
 ## Write batches and pacing
 

@@ -10,16 +10,17 @@ import Foundation
 
 struct AEADError: Error { }
 
-struct PacketKeys {
+final class PacketKeys {
     let suite: QUICCipherSuite
     let secret: [UInt8]
     let key: SymmetricKey
-    let iv: [UInt8]
     let headerProtector: HeaderProtector
+    private let noncePrefix: UInt32
+    private let nonceSuffix: UInt64
 
     var aead: AEADAlgorithm { self.suite.aead }
 
-    init(suite: QUICCipherSuite, secret: [UInt8]) {
+    convenience init(suite: QUICCipherSuite, secret: [UInt8]) {
         let aead = suite.aead
         let keyBytes = KeyDerivation.expandLabel(
             secret: secret,
@@ -54,11 +55,14 @@ struct PacketKeys {
         iv: [UInt8],
         headerProtector: HeaderProtector
     ) {
+        precondition(iv.count == AEADAlgorithm.nonceLength)
         self.suite = suite
         self.secret = secret
         self.key = key
-        self.iv = iv
         self.headerProtector = headerProtector
+        (self.noncePrefix, self.nonceSuffix) = iv.withUnsafeBytes { raw in
+            (raw.loadUnaligned(as: UInt32.self), raw.loadUnaligned(fromByteOffset: 4, as: UInt64.self))
+        }
     }
 
     static func initial(destinationID: QUICConnectionID, isClient: Bool) -> (read: PacketKeys, write: PacketKeys) {
@@ -96,15 +100,15 @@ struct PacketKeys {
         )
     }
 
-    func nonce(for packetNumber: UInt64) -> [UInt8] {
-        var nonce = self.iv
-        var number = packetNumber.bigEndian
-        withUnsafeBytes(of: &number) { raw in
-            for index in 0..<8 {
-                nonce[4 + index] ^= raw[index]
-            }
+    private func withNonce<Result>(
+        for packetNumber: UInt64,
+        _ body: (UnsafeRawBufferPointer) throws -> Result
+    ) rethrows -> Result {
+        return try withUnsafeTemporaryAllocation(byteCount: AEADAlgorithm.nonceLength, alignment: 8) { nonce in
+            nonce.storeBytes(of: self.noncePrefix, as: UInt32.self)
+            nonce.storeBytes(of: self.nonceSuffix ^ packetNumber.bigEndian, toByteOffset: 4, as: UInt64.self)
+            return try body(UnsafeRawBufferPointer(nonce))
         }
-        return nonce
     }
 
     func seal(
@@ -112,37 +116,76 @@ struct PacketKeys {
         header: UnsafeRawBufferPointer,
         payload: UnsafeMutableRawBufferPointer
     ) throws(AEADError) {
-        let nonceBytes = self.nonce(for: packetNumber)
         let plaintextLength = payload.count - AEADAlgorithm.tagLength
         precondition(plaintextLength >= 0)
-        let plaintext = UnsafeRawBufferPointer(rebasing: payload[0..<plaintextLength])
+        let message = UnsafeMutableRawBufferPointer(rebasing: payload[0..<plaintextLength])
+        let tag = UnsafeMutableRawBufferPointer(rebasing: payload[plaintextLength...])
         do {
-            switch self.aead {
-            case .aes128GCM, .aes256GCM:
-                let box = try AES.GCM.seal(
-                    plaintext,
-                    using: self.key,
-                    nonce: AES.GCM.Nonce(data: nonceBytes),
-                    authenticating: header
-                )
-                _ = box.ciphertext.copyBytes(to: payload.bindMemory(to: UInt8.self))
-                _ = box.tag.copyBytes(
-                    to: UnsafeMutableBufferPointer(rebasing: payload.bindMemory(to: UInt8.self)[plaintextLength...])
-                )
-            case .chaCha20Poly1305:
-                let box = try ChaChaPoly.seal(
-                    plaintext,
-                    using: self.key,
-                    nonce: ChaChaPoly.Nonce(data: nonceBytes),
-                    authenticating: header
-                )
-                _ = box.ciphertext.copyBytes(to: payload.bindMemory(to: UInt8.self))
-                _ = box.tag.copyBytes(
-                    to: UnsafeMutableBufferPointer(rebasing: payload.bindMemory(to: UInt8.self)[plaintextLength...])
-                )
+            try self.withNonce(for: packetNumber) { nonce in
+                if #available(iOS 27.0, macOS 27.0, tvOS 27.0, watchOS 27.0, visionOS 27.0, *) {
+                    try self.sealInPlace(nonce: nonce, header: header, message: message, tag: tag)
+                } else {
+                    try self.sealCopying(nonce: nonce, header: header, message: message, tag: tag)
+                }
             }
         } catch {
             throw AEADError()
+        }
+    }
+
+    @available(iOS 27.0, macOS 27.0, tvOS 27.0, watchOS 27.0, visionOS 27.0, *)
+    private func sealInPlace(
+        nonce: UnsafeRawBufferPointer,
+        header: UnsafeRawBufferPointer,
+        message messageBuffer: UnsafeMutableRawBufferPointer,
+        tag tagBuffer: UnsafeMutableRawBufferPointer
+    ) throws {
+        var message = messageBuffer.mutableBytes
+        var tag = OutputRawSpan(buffer: tagBuffer, initializedCount: 0)
+        switch self.aead {
+        case .aes128GCM, .aes256GCM:
+            try AES.GCM.seal(
+                inPlace: &message,
+                using: self.key,
+                nonce: AES.GCM.Nonce(data: nonce),
+                authenticating: header.bytes,
+                tag: &tag
+            )
+        case .chaCha20Poly1305:
+            try ChaChaPoly.seal(
+                inPlace: &message,
+                using: self.key,
+                nonce: ChaChaPoly.Nonce(data: nonce),
+                authenticating: header.bytes,
+                tag: &tag
+            )
+        }
+        guard tag.finalize(for: tagBuffer) == AEADAlgorithm.tagLength else {
+            throw AEADError()
+        }
+    }
+
+    private func sealCopying(
+        nonce: UnsafeRawBufferPointer,
+        header: UnsafeRawBufferPointer,
+        message: UnsafeMutableRawBufferPointer,
+        tag: UnsafeMutableRawBufferPointer
+    ) throws {
+        let plaintext = UnsafeRawBufferPointer(message)
+        switch self.aead {
+        case .aes128GCM, .aes256GCM:
+            let box = try AES.GCM.seal(plaintext, using: self.key, nonce: AES.GCM.Nonce(data: nonce), authenticating: header)
+            _ = box.ciphertext.copyBytes(to: message.bindMemory(to: UInt8.self))
+            _ = box.tag.copyBytes(to: tag.bindMemory(to: UInt8.self))
+        case .chaCha20Poly1305:
+            let box = try ChaChaPoly.seal(
+                plaintext,
+                using: self.key,
+                nonce: ChaChaPoly.Nonce(data: nonce),
+                authenticating: header
+            )
+            _ = box.ciphertext.copyBytes(to: message.bindMemory(to: UInt8.self))
+            _ = box.tag.copyBytes(to: tag.bindMemory(to: UInt8.self))
         }
     }
 
@@ -159,32 +202,72 @@ struct PacketKeys {
         guard output.count >= ciphertextLength else {
             throw AEADError()
         }
-        let nonceBytes = self.nonce(for: packetNumber)
         let ciphertext = UnsafeRawBufferPointer(rebasing: payload[0..<ciphertextLength])
         let tag = UnsafeRawBufferPointer(rebasing: payload[ciphertextLength...])
+        let message = UnsafeMutableRawBufferPointer(rebasing: output[0..<ciphertextLength])
         do {
-            let plaintext: Data
-            switch self.aead {
-            case .aes128GCM, .aes256GCM:
-                let box = try AES.GCM.SealedBox(
-                    nonce: AES.GCM.Nonce(data: nonceBytes),
-                    ciphertext: ciphertext,
-                    tag: tag
-                )
-                plaintext = try AES.GCM.open(box, using: self.key, authenticating: header)
-            case .chaCha20Poly1305:
-                let box = try ChaChaPoly.SealedBox(
-                    nonce: ChaChaPoly.Nonce(data: nonceBytes),
-                    ciphertext: ciphertext,
-                    tag: tag
-                )
-                plaintext = try ChaChaPoly.open(box, using: self.key, authenticating: header)
+            try self.withNonce(for: packetNumber) { nonce in
+                if #available(iOS 27.0, macOS 27.0, tvOS 27.0, watchOS 27.0, visionOS 27.0, *) {
+                    message.copyMemory(from: ciphertext)
+                    try self.openInPlace(nonce: nonce, header: header, message: message, tag: tag)
+                } else {
+                    try self.openCopying(nonce: nonce, header: header, ciphertext: ciphertext, tag: tag, into: message)
+                }
             }
-            _ = plaintext.copyBytes(to: output.bindMemory(to: UInt8.self))
-            return plaintext.count
         } catch {
             throw AEADError()
         }
+        return ciphertextLength
+    }
+
+    @available(iOS 27.0, macOS 27.0, tvOS 27.0, watchOS 27.0, visionOS 27.0, *)
+    private func openInPlace(
+        nonce: UnsafeRawBufferPointer,
+        header: UnsafeRawBufferPointer,
+        message messageBuffer: UnsafeMutableRawBufferPointer,
+        tag: UnsafeRawBufferPointer
+    ) throws {
+        var message = messageBuffer.mutableBytes
+        switch self.aead {
+        case .aes128GCM, .aes256GCM:
+            try AES.GCM.open(
+                inPlace: &message,
+                using: self.key,
+                nonce: AES.GCM.Nonce(data: nonce),
+                authenticating: header.bytes,
+                tag: tag.bytes
+            )
+        case .chaCha20Poly1305:
+            try ChaChaPoly.open(
+                inPlace: &message,
+                using: self.key,
+                nonce: ChaChaPoly.Nonce(data: nonce),
+                authenticating: header.bytes,
+                tag: tag.bytes
+            )
+        }
+    }
+
+    private func openCopying(
+        nonce: UnsafeRawBufferPointer,
+        header: UnsafeRawBufferPointer,
+        ciphertext: UnsafeRawBufferPointer,
+        tag: UnsafeRawBufferPointer,
+        into output: UnsafeMutableRawBufferPointer
+    ) throws {
+        let plaintext: Data
+        switch self.aead {
+        case .aes128GCM, .aes256GCM:
+            let box = try AES.GCM.SealedBox(nonce: AES.GCM.Nonce(data: nonce), ciphertext: ciphertext, tag: tag)
+            plaintext = try AES.GCM.open(box, using: self.key, authenticating: header)
+        case .chaCha20Poly1305:
+            let box = try ChaChaPoly.SealedBox(nonce: ChaChaPoly.Nonce(data: nonce), ciphertext: ciphertext, tag: tag)
+            plaintext = try ChaChaPoly.open(box, using: self.key, authenticating: header)
+        }
+        guard plaintext.count == output.count else {
+            throw AEADError()
+        }
+        _ = plaintext.copyBytes(to: output.bindMemory(to: UInt8.self))
     }
 
     func protectHeader(_ packet: UnsafeMutableRawBufferPointer, packetNumberOffset: Int, packetNumberLength: Int) {
