@@ -152,6 +152,8 @@ final class ConnectionCore {
 
     var decryptBuffer: [UInt8]
     var headerScratch = [UInt8](repeating: 0, count: 128)
+    var arena: PlaintextArena
+    var acknowledgedScratch: [SentPacket] = []
 
     var packetsSent: UInt64 = 0
     var packetsReceived: UInt64 = 0
@@ -232,6 +234,7 @@ final class ConnectionCore {
         self.keepAliveTimeout = settings.keepAliveTimeout
         self.keepAliveTimeoutNanoseconds = Self.keepAliveTimeoutNanoseconds(for: settings.keepAliveTimeout)
         self.decryptBuffer = [UInt8](repeating: 0, count: Swift.max(settings.maxSendUDPPayloadSize, 1500))
+        self.arena = PlaintextArena(packetCapacity: Swift.max(settings.maxSendUDPPayloadSize, 1500))
         let initial = PacketNumberSpace(level: .initial)
         let keys = PacketKeys.initial(destinationID: destinationID, isClient: true)
         initial.readKeys = keys.read

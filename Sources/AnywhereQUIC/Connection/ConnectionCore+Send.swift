@@ -14,7 +14,7 @@ extension ConnectionCore {
         var isRetransmittable = false
         var isProbe = false
         var isPMTUDProbe = false
-        var frames: [SentFrame] = []
+        var frames = SentFrames()
 
         mutating func addRetransmittable(_ frame: SentFrame) {
             self.frames.append(frame)

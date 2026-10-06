@@ -398,7 +398,7 @@ extension ConnectionCore {
             return
         }
         if offset <= readOffset {
-            let delivered = stream.receive!.receive(offset: offset, data: data) ?? Data()
+            let delivered = stream.receive!.receive(offset: offset, data: data) { self.arena.slice($0) } ?? Data()
             let finished = stream.isReadClosed && stream.receiveOffset == stream.receiveLastOffset
             if !delivered.isEmpty || finished {
                 self.emit(.streamData(stream.id, delivered, fin: finished))

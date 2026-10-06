@@ -27,3 +27,7 @@ The timer should fire close to the deadline. A deadline that is routinely late b
 `QUICTLSProvider` and `QUICCongestionController` methods run while the connection's lock is held. They must not call back into the same `QUICConnection`, because the lock is not recursive and a recursive acquisition traps. They must not block either, because every thread that touches the connection waits for them.
 
 Certificate trust evaluation can block, for example when it fetches intermediates or revocation data. A provider defers it by returning `.verifyPeer(certificates:)` instead of completing the handshake. The connection then emits `.peerVerificationRequested(certificates:)`, keeps acknowledging handshake packets and buffers 1-RTT packets. The caller evaluates the chain outside the lock and reports the result with `completePeerVerification(error:now:)`, which passes it to the provider's `completePeerVerification(error:)`. A non-nil error closes the connection with a TLS error. The handshake timeout keeps running while the evaluation is pending.
+
+## Delivered payloads
+
+The `Data` carried by `.streamData` and `.datagramReceived` can be a slice of a buffer that also holds the payloads of up to three neighbouring packets. Its `startIndex` is not necessarily 0, and keeping it alive keeps the whole buffer alive. Index it relative to `startIndex`, and copy it when it is going to sit in a queue for long.

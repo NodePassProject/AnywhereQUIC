@@ -35,11 +35,62 @@ enum SentFrame {
     }
 }
 
+struct SentFrames {
+    private var first: SentFrame?
+    private var second: SentFrame?
+    private var rest: [SentFrame] = []
+
+    init() { }
+
+    mutating func append(_ frame: SentFrame) {
+        if self.first == nil {
+            self.first = frame
+        } else if self.second == nil {
+            self.second = frame
+        } else {
+            self.rest.append(frame)
+        }
+    }
+}
+
+extension SentFrames: Sequence {
+    struct Iterator: IteratorProtocol {
+        let frames: SentFrames
+        var index = 0
+
+        mutating func next() -> SentFrame? {
+            defer { self.index += 1 }
+            switch self.index {
+            case 0:
+                return self.frames.first
+            case 1:
+                return self.frames.second
+            default:
+                let offset = self.index - 2
+                return offset < self.frames.rest.count ? self.frames.rest[offset] : nil
+            }
+        }
+    }
+
+    func makeIterator() -> Iterator {
+        return Iterator(frames: self)
+    }
+}
+
+extension SentFrames: ExpressibleByArrayLiteral {
+    init(arrayLiteral elements: SentFrame...) {
+        self.init()
+        for element in elements {
+            self.append(element)
+        }
+    }
+}
+
 struct SentPacket {
     var packetNumber: UInt64
     var sentAt: Nanoseconds
     var size: Int
-    var frames: [SentFrame]
+    var frames: SentFrames
     var isACKEliciting: Bool
     var isPTOEliciting: Bool
     var isRetransmittable: Bool
@@ -61,7 +112,6 @@ struct SentPacket {
 }
 
 struct ACKProcessingResult {
-    var acknowledged: [SentPacket] = []
     var hasAcknowledgedACKElicitingPacket = false
     var largestAcknowledgedSentAt: Nanoseconds = Time.never
     var hasNewLargestAcknowledged = false
@@ -147,7 +197,9 @@ struct SentPacketTracker {
         return low
     }
     
-    private mutating func removePackets(in ranges: [Range<Int>]) {
+    private mutating func removePackets<Ranges: RandomAccessCollection>(
+        in ranges: Ranges
+    ) where Ranges.Element == Range<Int>, Ranges.Index == Int {
         guard let first = ranges.first, let last = ranges.last else {
             return
         }
@@ -200,21 +252,28 @@ struct SentPacketTracker {
 
     mutating func processACK(
         _ ack: ACKFrame,
-        state: inout QUICCongestionState
+        state: inout QUICCongestionState,
+        into acknowledged: inout [SentPacket]
     ) throws(TransportError) -> ACKProcessingResult {
         var result = ACKProcessingResult()
         if self.largestAcknowledged == nil || self.largestAcknowledged! < ack.largestAcknowledged {
             self.largestAcknowledged = ack.largestAcknowledged
             result.hasNewLargestAcknowledged = true
         }
+        if ack.additionalRanges.isEmpty {
+            let range = self.indexRange(acknowledging: (ack.largestAcknowledged - ack.firstRange)...ack.largestAcknowledged)
+            guard !range.isEmpty else {
+                return result
+            }
+            self.collect(range, largestAcknowledged: ack.largestAcknowledged, into: &acknowledged, result: &result, state: &state)
+            self.removePackets(in: CollectionOfOne(range))
+            return result
+        }
         var ranges: [Range<Int>] = []
         ack.forEachRange { range in
-            let lowerBound = self.firstIndex(atOrAbove: range.lowerBound)
-            let upperBound = range.upperBound == .max
-                ? self.storage.count
-                : self.firstIndex(atOrAbove: range.upperBound + 1)
-            if lowerBound < upperBound {
-                ranges.append(lowerBound..<upperBound)
+            let indices = self.indexRange(acknowledging: range)
+            if !indices.isEmpty {
+                ranges.append(indices)
             }
         }
         guard !ranges.isEmpty else {
@@ -230,22 +289,40 @@ struct SentPacketTracker {
                 merged.append(range)
             }
         }
-        result.acknowledged.reserveCapacity(merged.reduce(0) { $0 + $1.count })
+        acknowledged.reserveCapacity(acknowledged.count + merged.reduce(0) { $0 + $1.count })
         for range in merged {
-            for index in range {
-                let packet = self.storage[index]
-                if packet.packetNumber == ack.largestAcknowledged {
-                    result.largestAcknowledgedSentAt = packet.sentAt
-                }
-                if packet.isACKEliciting {
-                    result.hasAcknowledgedACKElicitingPacket = true
-                }
-                _ = self.accountRemoval(packet, state: &state)
-                result.acknowledged.append(packet)
-            }
+            self.collect(range, largestAcknowledged: ack.largestAcknowledged, into: &acknowledged, result: &result, state: &state)
         }
         self.removePackets(in: merged)
         return result
+    }
+
+    private func indexRange(acknowledging range: ClosedRange<UInt64>) -> Range<Int> {
+        let lowerBound = self.firstIndex(atOrAbove: range.lowerBound)
+        let upperBound = range.upperBound == .max
+            ? self.storage.count
+            : self.firstIndex(atOrAbove: range.upperBound + 1)
+        return lowerBound..<Swift.max(lowerBound, upperBound)
+    }
+
+    private mutating func collect(
+        _ range: Range<Int>,
+        largestAcknowledged: UInt64,
+        into acknowledged: inout [SentPacket],
+        result: inout ACKProcessingResult,
+        state: inout QUICCongestionState
+    ) {
+        for index in range {
+            let packet = self.storage[index]
+            if packet.packetNumber == largestAcknowledged {
+                result.largestAcknowledgedSentAt = packet.sentAt
+            }
+            if packet.isACKEliciting {
+                result.hasAcknowledgedACKElicitingPacket = true
+            }
+            _ = self.accountRemoval(packet, state: &state)
+            acknowledged.append(packet)
+        }
     }
 
     mutating func detectLost(

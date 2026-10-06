@@ -348,16 +348,34 @@ extension ConnectionCore {
         packetNumber: UInt64,
         keys: PacketKeys
     ) -> Int? {
+        self.ensureDecryptBuffer(packetLength)
+        return self.decryptBuffer.withUnsafeMutableBytes { output -> Int? in
+            return self.decryptPayload(
+                bytes,
+                payloadStart: payloadStart,
+                packetLength: packetLength,
+                packetNumber: packetNumber,
+                keys: keys,
+                into: output
+            )
+        }
+    }
+
+    func decryptPayload(
+        _ bytes: UnsafeRawBufferPointer,
+        payloadStart: Int,
+        packetLength: Int,
+        packetNumber: UInt64,
+        keys: PacketKeys,
+        into output: UnsafeMutableRawBufferPointer
+    ) -> Int? {
         guard payloadStart <= packetLength else {
             return nil
         }
-        self.ensureDecryptBuffer(packetLength)
         let payload = UnsafeRawBufferPointer(rebasing: bytes[payloadStart..<packetLength])
         return self.headerScratch.withUnsafeBytes { scratch -> Int? in
             let aad = UnsafeRawBufferPointer(rebasing: scratch[0..<payloadStart])
-            return self.decryptBuffer.withUnsafeMutableBytes { output -> Int? in
-                return try? keys.open(packetNumber: packetNumber, header: aad, payload: payload, into: output)
-            }
+            return try? keys.open(packetNumber: packetNumber, header: aad, payload: payload, into: output)
         }
     }
 
@@ -577,14 +595,30 @@ extension ConnectionCore {
         }
         let payloadStart = header.packetNumberOffset + unprotected.packetNumberLength
         var plaintextLength: Int?
+        var region: UnsafeMutableRawBufferPointer?
         if !forceFailure {
-            plaintextLength = self.decryptPayload(
-                bytes,
-                payloadStart: payloadStart,
-                packetLength: packetLength,
-                packetNumber: packetNumber,
-                keys: keys
-            )
+            if header.type == .oneRTT {
+                let output = self.arena.region(
+                    count: Swift.max(0, packetLength - payloadStart - AEADAlgorithm.tagLength)
+                )
+                region = output
+                plaintextLength = self.decryptPayload(
+                    bytes,
+                    payloadStart: payloadStart,
+                    packetLength: packetLength,
+                    packetNumber: packetNumber,
+                    keys: keys,
+                    into: output
+                )
+            } else {
+                plaintextLength = self.decryptPayload(
+                    bytes,
+                    payloadStart: payloadStart,
+                    packetLength: packetLength,
+                    packetNumber: packetNumber,
+                    keys: keys
+                )
+            }
         }
         guard let plaintextLength else {
             if header.type == .oneRTT {
@@ -618,92 +652,29 @@ extension ConnectionCore {
             )
             return self.state == .draining ? .stop : .consumed(packetLength)
         }
-        var isACKEliciting = false
-        var receivedNewConnectionID = false
-        try self.decryptBuffer.withUnsafeBufferPointer { (buffer) throws(TransportError) in
-            var reader = InputBuffer(storage: UnsafeRawBufferPointer(UnsafeBufferPointer(rebasing: buffer[0..<plaintextLength])))
-            while reader.byteCount > 0 {
-                let frame = try reader.readFrame()
-                if frame.isACKEliciting {
-                    isACKEliciting = true
-                }
-                switch frame {
-                case .padding, .ping:
-                    break
-                case .ack(let ack):
-                    self.isServerAddressVerified = true
-                    try self.handleACK(
-                        ack,
-                        space: space,
-                        ackDelay: self.scaledACKDelay(ack.ackDelay),
-                        receivedAt: receivedAt,
-                        now: now
-                    )
-                case .stream(let streamID, let offset, let data, let fin):
-                    try self.handleStreamFrame(
-                        streamID: streamID,
-                        offset: offset,
-                        data: data,
-                        fin: fin,
-                        frameType: frame.type
-                    )
-                case .crypto(let offset, let data):
-                    try self.handleCrypto(space: space, offset: offset, data: data, now: now)
-                case .resetStream(let streamID, let errorCode, let finalSize):
-                    try self.handleResetStream(streamID: streamID, errorCode: errorCode, finalSize: finalSize)
-                case .stopSending(let streamID, let errorCode):
-                    try self.handleStopSending(streamID: streamID, errorCode: errorCode)
-                case .maxData(let maximum):
-                    self.handleMaxData(maximum)
-                case .maxStreamData(let streamID, let maximum):
-                    try self.handleMaxStreamData(streamID: streamID, maximum: maximum)
-                case .maxStreams(let bidirectional, let maximum):
-                    self.handleMaxStreams(bidirectional: bidirectional, maximum: maximum)
-                case .dataBlocked(let limit):
-                    try self.handleDataBlocked(limit)
-                case .streamDataBlocked(let streamID, let limit):
-                    try self.handleStreamDataBlocked(streamID: streamID, limit: limit)
-                case .streamsBlocked(let bidirectional, let limit):
-                    try self.handleStreamsBlocked(bidirectional: bidirectional, limit: limit)
-                case .newToken:
-                    break
-                case .newConnectionID(let sequence, let retirePriorTo, let id, let token):
-                    try self.handleNewConnectionID(
-                        sequence: sequence,
-                        retirePriorTo: retirePriorTo,
-                        id: id,
-                        token: token,
-                        now: now
-                    )
-                    receivedNewConnectionID = true
-                case .retireConnectionID(let sequence):
-                    try self.handleRetireConnectionID(
-                        sequence: sequence,
-                        packetDestinationID: header.destinationID,
-                        now: now
-                    )
-                case .pathChallenge(let data):
-                    self.handlePathChallenge(data, path: path)
-                case .pathResponse(let data):
-                    try self.handlePathResponse(data, now: now)
-                case .connectionClose(let close):
-                    self.handlePeerClose(close, now: now)
-                case .datagram(let data, let frameLength, _):
-                    guard self.localTransportParameters.maxDatagramFrameSize > 0,
-                          UInt64(frameLength) <= self.localTransportParameters.maxDatagramFrameSize else {
-                        throw TransportError(
-                            .protocolViolation,
-                            frameType: frame.type,
-                            reason: "DATAGRAM exceeds advertised limit"
-                        )
-                    }
-                    self.emit(.datagramReceived(Data(data)))
-                case .handshakeDone:
-                    self.confirmHandshake(now: now)
-                }
+        let outcome: FrameOutcome
+        if let region {
+            outcome = try self.processFrames(
+                UnsafeRawBufferPointer(rebasing: UnsafeRawBufferPointer(region)[0..<plaintextLength]),
+                header: header,
+                space: space,
+                path: path,
+                receivedAt: receivedAt,
+                now: now
+            )
+        } else {
+            outcome = try self.decryptBuffer.withUnsafeBufferPointer { (buffer) throws(TransportError) in
+                return try self.processFrames(
+                    UnsafeRawBufferPointer(UnsafeBufferPointer(rebasing: buffer[0..<plaintextLength])),
+                    header: header,
+                    space: space,
+                    path: path,
+                    receivedAt: receivedAt,
+                    now: now
+                )
             }
         }
-        if receivedNewConnectionID {
+        if outcome.receivedNewConnectionID {
             try self.postProcessNewConnectionIDs(now: now)
             guard !self.destinationIDs.isRetireSequenceLimitExceeded else {
                 throw TransportError(
@@ -723,12 +694,110 @@ extension ConnectionCore {
         }
         space.ackTracker.recordReceived(
             packetNumber,
-            isACKEliciting: isACKEliciting,
+            isACKEliciting: outcome.isACKEliciting,
             now: receivedAt,
             ackThreshold: self.settings.ackThreshold
         )
         self.restartIdleTimerOnRead(now)
         return self.state == .draining ? .stop : .consumed(packetLength)
+    }
+
+    struct FrameOutcome {
+        var isACKEliciting = false
+        var receivedNewConnectionID = false
+    }
+
+    private func processFrames(
+        _ plaintext: UnsafeRawBufferPointer,
+        header: PacketHeader,
+        space: PacketNumberSpace,
+        path: QUICPath,
+        receivedAt: Nanoseconds,
+        now: Nanoseconds
+    ) throws(TransportError) -> FrameOutcome {
+        var outcome = FrameOutcome()
+        var reader = InputBuffer(storage: plaintext)
+        while reader.byteCount > 0 {
+            let frame = try reader.readFrame()
+            if frame.isACKEliciting {
+                outcome.isACKEliciting = true
+            }
+            switch frame {
+            case .padding, .ping:
+                break
+            case .ack(let ack):
+                self.isServerAddressVerified = true
+                try self.handleACK(
+                    ack,
+                    space: space,
+                    ackDelay: self.scaledACKDelay(ack.ackDelay),
+                    receivedAt: receivedAt,
+                    now: now
+                )
+            case .stream(let streamID, let offset, let data, let fin):
+                try self.handleStreamFrame(
+                    streamID: streamID,
+                    offset: offset,
+                    data: data,
+                    fin: fin,
+                    frameType: frame.type
+                )
+            case .crypto(let offset, let data):
+                try self.handleCrypto(space: space, offset: offset, data: data, now: now)
+            case .resetStream(let streamID, let errorCode, let finalSize):
+                try self.handleResetStream(streamID: streamID, errorCode: errorCode, finalSize: finalSize)
+            case .stopSending(let streamID, let errorCode):
+                try self.handleStopSending(streamID: streamID, errorCode: errorCode)
+            case .maxData(let maximum):
+                self.handleMaxData(maximum)
+            case .maxStreamData(let streamID, let maximum):
+                try self.handleMaxStreamData(streamID: streamID, maximum: maximum)
+            case .maxStreams(let bidirectional, let maximum):
+                self.handleMaxStreams(bidirectional: bidirectional, maximum: maximum)
+            case .dataBlocked(let limit):
+                try self.handleDataBlocked(limit)
+            case .streamDataBlocked(let streamID, let limit):
+                try self.handleStreamDataBlocked(streamID: streamID, limit: limit)
+            case .streamsBlocked(let bidirectional, let limit):
+                try self.handleStreamsBlocked(bidirectional: bidirectional, limit: limit)
+            case .newToken:
+                break
+            case .newConnectionID(let sequence, let retirePriorTo, let id, let token):
+                try self.handleNewConnectionID(
+                    sequence: sequence,
+                    retirePriorTo: retirePriorTo,
+                    id: id,
+                    token: token,
+                    now: now
+                )
+                outcome.receivedNewConnectionID = true
+            case .retireConnectionID(let sequence):
+                try self.handleRetireConnectionID(
+                    sequence: sequence,
+                    packetDestinationID: header.destinationID,
+                    now: now
+                )
+            case .pathChallenge(let data):
+                self.handlePathChallenge(data, path: path)
+            case .pathResponse(let data):
+                try self.handlePathResponse(data, now: now)
+            case .connectionClose(let close):
+                self.handlePeerClose(close, now: now)
+            case .datagram(let data, let frameLength, _):
+                guard self.localTransportParameters.maxDatagramFrameSize > 0,
+                      UInt64(frameLength) <= self.localTransportParameters.maxDatagramFrameSize else {
+                    throw TransportError(
+                        .protocolViolation,
+                        frameType: frame.type,
+                        reason: "DATAGRAM exceeds advertised limit"
+                    )
+                }
+                self.emit(.datagramReceived(self.arena.slice(data) ?? Data(data)))
+            case .handshakeDone:
+                self.confirmHandshake(now: now)
+            }
+        }
+        return outcome
     }
 
     private func processDelayedHandshakePacket(

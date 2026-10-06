@@ -32,14 +32,15 @@ extension ConnectionCore {
         if space.isApplication {
             self.confirmLocalKeyUpdate(acknowledgedLargest: ack.largestAcknowledged, now: now)
         }
-        let result = try space.sent.processACK(ack, state: &self.congestionState)
+        self.acknowledgedScratch.removeAll(keepingCapacity: true)
+        let result = try space.sent.processACK(ack, state: &self.congestionState, into: &self.acknowledgedScratch)
         var summary = QUICAcknowledgementSummary(
             bytesDelivered: 0,
             bytesLost: 0,
             largestAcknowledgedSentAt: nil,
             rtt: nil
         )
-        summary.deliveryRate = self.deliveryRateSampler.onACK(result.acknowledged, now: now)
+        summary.deliveryRate = self.deliveryRateSampler.onACK(self.acknowledgedScratch, now: now)
         if result.hasAcknowledgedACKElicitingPacket, result.largestAcknowledgedSentAt != Time.never {
             let sample = Swift.max(receivedAt.subtractingClamped(result.largestAcknowledgedSentAt), Time.nanosecond)
             _ = self.congestionState.updateRTT(
@@ -52,7 +53,7 @@ extension ConnectionCore {
             summary.rtt = Duration(nanoseconds: sample)
             summary.largestAcknowledgedSentAt = QUICInstant(nanoseconds: result.largestAcknowledgedSentAt)
         }
-        for packet in result.acknowledged {
+        for packet in self.acknowledgedScratch {
             self.processAcknowledgedFrames(of: packet, space: space)
             if packet.countsTowardCongestion {
                 summary.bytesDelivered += UInt64(packet.size)
@@ -66,7 +67,7 @@ extension ConnectionCore {
                 self.ptoCount = 0
             }
         }
-        if !result.acknowledged.isEmpty {
+        if !self.acknowledgedScratch.isEmpty {
             let loss = space.sent.detectLost(
                 now: now,
                 state: &self.congestionState,
@@ -169,7 +170,7 @@ extension ConnectionCore {
         }
     }
 
-    func reclaimFrames(_ frames: [SentFrame], space: PacketNumberSpace) {
+    func reclaimFrames(_ frames: some Sequence<SentFrame>, space: PacketNumberSpace) {
         for frame in frames {
             switch frame {
             case .crypto(let offset, let length):

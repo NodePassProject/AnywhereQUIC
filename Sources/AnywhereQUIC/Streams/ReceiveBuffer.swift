@@ -26,7 +26,11 @@ struct ReceiveBuffer {
 
     var hasPendingData: Bool { self.pendingHead < self.pending.count }
 
-    mutating func receive(offset: UInt64, data: UnsafeRawBufferPointer) -> Data? {
+    mutating func receive(
+        offset: UInt64,
+        data: UnsafeRawBufferPointer,
+        slice: (UnsafeRawBufferPointer) -> Data? = { _ in nil }
+    ) -> Data? {
         let end = offset + UInt64(data.count)
         if end <= self.readOffset {
             return nil
@@ -41,7 +45,10 @@ struct ReceiveBuffer {
         if start == self.readOffset {
             self.readOffset = end
             guard self.hasPendingData, self.pending[self.pendingHead].offset <= end else {
-                return bytes.isEmpty ? Data() : Data(bytes: bytes.baseAddress!, count: bytes.count)
+                if bytes.isEmpty {
+                    return Data()
+                }
+                return slice(bytes) ?? Data(bytes: bytes.baseAddress!, count: bytes.count)
             }
             var delivered = Data(capacity: bytes.count + self.deliverableBufferedBytes())
             bytes.withMemoryRebound(to: UInt8.self) { delivered.append($0) }
