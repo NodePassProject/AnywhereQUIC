@@ -8,13 +8,23 @@
 import Foundation
 
 struct ReceiveBuffer {
+    private struct Chunk {
+        var offset: UInt64
+        var data: [UInt8]
+
+        var end: UInt64 { self.offset + UInt64(self.data.count) }
+    }
+
+    private static let compactionThreshold = 32
+
     private(set) var readOffset: UInt64 = 0
-    private var pending: [(offset: UInt64, data: [UInt8])] = []
+    private var pending: [Chunk] = []
+    private var pendingHead = 0
     private var discardedRanges = RangeSet()
     private(set) var bufferedBytes = 0
     private(set) var isBuffering = true
 
-    var hasPendingData: Bool { !self.pending.isEmpty }
+    var hasPendingData: Bool { self.pendingHead < self.pending.count }
 
     mutating func receive(offset: UInt64, data: UnsafeRawBufferPointer) -> Data? {
         let end = offset + UInt64(data.count)
@@ -29,68 +39,114 @@ struct ReceiveBuffer {
             start = self.readOffset
         }
         if start == self.readOffset {
-            var delivered = Data(bytes)
             self.readOffset = end
-            self.drainPending(into: &delivered)
+            guard self.hasPendingData, self.pending[self.pendingHead].offset <= end else {
+                return Data(bytes)
+            }
+            var delivered = Data(capacity: bytes.count + self.deliverableBufferedBytes())
+            bytes.withMemoryRebound(to: UInt8.self) { delivered.append($0) }
+            self.drainPending(into: &delivered, keepingData: true)
             return delivered
         }
         guard self.isBuffering else {
             self.discardedRanges.insert(start..<end)
             return nil
         }
-        self.insertPending(offset: start, bytes: Array(bytes))
+        self.insertPending(offset: start, bytes: bytes)
         return nil
     }
 
-    private mutating func drainPending(into delivered: inout Data) {
-        while let first = self.pending.first, first.offset <= self.readOffset {
-            self.pending.removeFirst()
-            self.bufferedBytes -= first.data.count
-            let end = first.offset + UInt64(first.data.count)
+    private func deliverableBufferedBytes() -> Int {
+        var cursor = self.readOffset
+        var count = 0
+        var index = self.pendingHead
+        while index < self.pending.count, self.pending[index].offset <= cursor {
+            let end = self.pending[index].end
+            if end > cursor {
+                count += Int(end - cursor)
+                cursor = end
+            }
+            index += 1
+        }
+        return count
+    }
+
+    private mutating func drainPending(into delivered: inout Data, keepingData: Bool) {
+        var index = self.pendingHead
+        while index < self.pending.count, self.pending[index].offset <= self.readOffset {
+            let chunk = self.pending[index]
+            self.pending[index].data = []
+            index += 1
+            self.bufferedBytes -= chunk.data.count
+            let end = chunk.end
             if end <= self.readOffset {
                 continue
             }
-            let skip = Int(self.readOffset - first.offset)
-            delivered.append(contentsOf: first.data[skip...])
+            if keepingData {
+                let skip = Int(self.readOffset - chunk.offset)
+                delivered.append(contentsOf: chunk.data[skip...])
+            }
             self.readOffset = end
+        }
+        if index == self.pending.count {
+            self.pending.removeAll(keepingCapacity: true)
+            self.pendingHead = 0
+        } else if index >= Self.compactionThreshold, index * 2 >= self.pending.count {
+            self.pending.removeFirst(index)
+            self.pendingHead = 0
+        } else {
+            self.pendingHead = index
         }
     }
 
-    private mutating func insertPending(offset: UInt64, bytes: [UInt8]) {
+    private func firstPendingIndex(endingAfter value: UInt64) -> Int {
+        var low = self.pendingHead
+        var high = self.pending.count
+        while low < high {
+            let mid = low + (high - low) / 2
+            if self.pending[mid].end <= value {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+        return low
+    }
+
+    private mutating func insertPending(offset: UInt64, bytes: UnsafeRawBufferPointer) {
         var start = offset
-        var chunk = bytes[...]
-        var index = self.pending.firstIndex { $0.offset + UInt64($0.data.count) > start } ?? self.pending.count
-        while index < self.pending.count, !chunk.isEmpty {
-            let existing = self.pending[index]
-            let existingEnd = existing.offset + UInt64(existing.data.count)
-            if existing.offset > start {
-                let gap = Int(Swift.min(UInt64(chunk.count), existing.offset - start))
-                let piece = Array(chunk.prefix(gap))
-                self.pending.insert((start, piece), at: index)
-                self.bufferedBytes += piece.count
-                chunk = chunk.dropFirst(gap)
+        var remaining = bytes
+        var index = self.firstPendingIndex(endingAfter: start)
+        while index < self.pending.count, !remaining.isEmpty {
+            let existingOffset = self.pending[index].offset
+            if existingOffset > start {
+                let gap = Int(Swift.min(UInt64(remaining.count), existingOffset - start))
+                let piece = Chunk(offset: start, data: Array(UnsafeRawBufferPointer(rebasing: remaining[..<gap])))
+                self.pending.insert(piece, at: index)
+                self.bufferedBytes += gap
+                remaining = UnsafeRawBufferPointer(rebasing: remaining[gap...])
                 start += UInt64(gap)
                 index += 1
                 continue
             }
-            let overlap = Int(Swift.min(UInt64(chunk.count), existingEnd - start))
-            chunk = chunk.dropFirst(overlap)
+            let overlap = Int(Swift.min(UInt64(remaining.count), self.pending[index].end - start))
+            remaining = UnsafeRawBufferPointer(rebasing: remaining[overlap...])
             start += UInt64(overlap)
             index += 1
         }
-        if !chunk.isEmpty {
-            let piece = Array(chunk)
-            self.pending.append((start, piece))
-            self.bufferedBytes += piece.count
+        if !remaining.isEmpty {
+            self.pending.append(Chunk(offset: start, data: Array(remaining)))
+            self.bufferedBytes += remaining.count
         }
     }
 
     mutating func stopBuffering() {
         self.isBuffering = false
-        for chunk in self.pending {
-            self.discardedRanges.insert(chunk.offset..<chunk.offset + UInt64(chunk.data.count))
+        for chunk in self.pending[self.pendingHead...] {
+            self.discardedRanges.insert(chunk.offset..<chunk.end)
         }
         self.pending.removeAll()
+        self.pendingHead = 0
         self.bufferedBytes = 0
     }
 
@@ -101,7 +157,7 @@ struct ReceiveBuffer {
         var dropped = Data()
         let previous = self.readOffset
         self.readOffset = offset
-        self.drainPending(into: &dropped)
+        self.drainPending(into: &dropped, keepingData: false)
         self.readOffset = self.discardedRanges.firstMissing(from: Swift.max(self.readOffset, offset))
         self.discardedRanges.removeAll(below: self.readOffset)
         return self.readOffset - previous

@@ -197,7 +197,6 @@ extension ConnectionCore {
             return
         }
         stream.isQueued = false
-        self.streamSendQueue.removeAll { $0 == stream.id }
     }
 
     func closeStreamIfDone(_ stream: Stream) {

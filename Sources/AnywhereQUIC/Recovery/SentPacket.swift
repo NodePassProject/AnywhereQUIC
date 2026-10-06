@@ -76,7 +76,10 @@ struct SentPacketTracker {
         var hasPersistentCongestion = false
     }
 
-    private(set) var packets: [SentPacket] = []
+    private static let compactionThreshold = 32
+
+    private var storage: [SentPacket] = []
+    private var head = 0
     private(set) var largestAcknowledged: UInt64?
     private(set) var ackElicitingCount = 0
     private(set) var retransmittableCount = 0
@@ -86,15 +89,17 @@ struct SentPacketTracker {
     var probePacketsLeft = 0
     private(set) var congestionPacketNumber: UInt64 = 0
 
-    var isEmpty: Bool { self.packets.isEmpty }
+    var packets: ArraySlice<SentPacket> { self.storage[self.head...] }
+
+    var isEmpty: Bool { self.head == self.storage.count }
 
     mutating func add(_ packet: SentPacket, state: inout QUICCongestionState) {
         var packet = packet
         packet.countsTowardCongestion = packet.packetNumber >= self.congestionPacketNumber
-        if let last = self.packets.last {
-            precondition(packet.packetNumber > last.packetNumber)
+        if self.head < self.storage.count {
+            precondition(packet.packetNumber > self.storage[self.storage.count - 1].packetNumber)
         }
-        self.packets.append(packet)
+        self.storage.append(packet)
         if packet.countsTowardCongestion {
             state.bytesInFlight += UInt64(packet.size)
             self.congestionBytesInFlight += UInt64(packet.size)
@@ -128,32 +133,69 @@ struct SentPacketTracker {
         return packet.isPMTUDProbe ? 0 : UInt64(packet.size)
     }
 
-    private func index(of packetNumber: UInt64) -> Int? {
-        var low = 0
-        var high = self.packets.count
-        while low < high {
-            let mid = (low + high) / 2
-            if self.packets[mid].packetNumber < packetNumber {
-                low = mid + 1
-            } else {
-                high = mid
-            }
-        }
-        return low < self.packets.count && self.packets[low].packetNumber == packetNumber ? low : nil
-    }
-
     private func firstIndex(atOrAbove packetNumber: UInt64) -> Int {
-        var low = 0
-        var high = self.packets.count
+        var low = self.head
+        var high = self.storage.count
         while low < high {
-            let mid = (low + high) / 2
-            if self.packets[mid].packetNumber < packetNumber {
+            let mid = low + (high - low) / 2
+            if self.storage[mid].packetNumber < packetNumber {
                 low = mid + 1
             } else {
                 high = mid
             }
         }
         return low
+    }
+    
+    private mutating func removePackets(in ranges: [Range<Int>]) {
+        guard let first = ranges.first, let last = ranges.last else {
+            return
+        }
+        let removedCount = ranges.reduce(0) { $0 + $1.count }
+        let movesTowardsEnd = last.upperBound - self.head - removedCount
+        let movesTowardsStart = self.storage.count - first.lowerBound - removedCount
+        if movesTowardsEnd <= movesTowardsStart {
+            var write = last.upperBound
+            var rangeIndex = ranges.count - 1
+            var index = last.upperBound
+            while index > self.head {
+                index -= 1
+                while rangeIndex >= 0, ranges[rangeIndex].lowerBound > index {
+                    rangeIndex -= 1
+                }
+                if rangeIndex >= 0, ranges[rangeIndex].contains(index) {
+                    continue
+                }
+                write -= 1
+                if write != index {
+                    self.storage.swapAt(write, index)
+                }
+            }
+            self.head = write
+        } else {
+            var write = first.lowerBound
+            var rangeIndex = 0
+            for index in first.lowerBound..<self.storage.count {
+                while rangeIndex < ranges.count, ranges[rangeIndex].upperBound <= index {
+                    rangeIndex += 1
+                }
+                if rangeIndex < ranges.count, ranges[rangeIndex].contains(index) {
+                    continue
+                }
+                if write != index {
+                    self.storage.swapAt(write, index)
+                }
+                write += 1
+            }
+            self.storage.removeLast(self.storage.count - write)
+        }
+        if self.head == self.storage.count {
+            self.storage.removeAll(keepingCapacity: true)
+            self.head = 0
+        } else if self.head >= Self.compactionThreshold, self.head * 2 >= self.storage.count {
+            self.storage.removeFirst(self.head)
+            self.head = 0
+        }
     }
 
     mutating func processACK(
@@ -165,39 +207,44 @@ struct SentPacketTracker {
             self.largestAcknowledged = ack.largestAcknowledged
             result.hasNewLargestAcknowledged = true
         }
-        var remove = [Bool](repeating: false, count: self.packets.count)
-        var anyRemoved = false
+        var ranges: [Range<Int>] = []
         ack.forEachRange { range in
-            var index = self.firstIndex(atOrAbove: range.lowerBound)
-            while index < self.packets.count, self.packets[index].packetNumber <= range.upperBound {
-                if !remove[index] {
-                    remove[index] = true
-                    anyRemoved = true
-                    let packet = self.packets[index]
-                    if packet.packetNumber == ack.largestAcknowledged {
-                        result.largestAcknowledgedSentAt = packet.sentAt
-                    }
-                    if packet.isACKEliciting {
-                        result.hasAcknowledgedACKElicitingPacket = true
-                    }
-                }
-                index += 1
+            let lowerBound = self.firstIndex(atOrAbove: range.lowerBound)
+            let upperBound = range.upperBound == .max
+                ? self.storage.count
+                : self.firstIndex(atOrAbove: range.upperBound + 1)
+            if lowerBound < upperBound {
+                ranges.append(lowerBound..<upperBound)
             }
         }
-        guard anyRemoved else {
+        guard !ranges.isEmpty else {
             return result
         }
-        var kept: [SentPacket] = []
-        kept.reserveCapacity(self.packets.count)
-        for (index, packet) in self.packets.enumerated() {
-            if remove[index] {
-                _ = self.accountRemoval(packet, state: &state)
-                result.acknowledged.append(packet)
+        ranges.sort { $0.lowerBound < $1.lowerBound }
+        var merged: [Range<Int>] = []
+        merged.reserveCapacity(ranges.count)
+        for range in ranges {
+            if let previous = merged.last, range.lowerBound <= previous.upperBound {
+                merged[merged.count - 1] = previous.lowerBound..<Swift.max(previous.upperBound, range.upperBound)
             } else {
-                kept.append(packet)
+                merged.append(range)
             }
         }
-        self.packets = kept
+        result.acknowledged.reserveCapacity(merged.reduce(0) { $0 + $1.count })
+        for range in merged {
+            for index in range {
+                let packet = self.storage[index]
+                if packet.packetNumber == ack.largestAcknowledged {
+                    result.largestAcknowledgedSentAt = packet.sentAt
+                }
+                if packet.isACKEliciting {
+                    result.hasAcknowledgedACKElicitingPacket = true
+                }
+                _ = self.accountRemoval(packet, state: &state)
+                result.acknowledged.append(packet)
+            }
+        }
+        self.removePackets(in: merged)
         return result
     }
 
@@ -221,39 +268,45 @@ struct SentPacketTracker {
             Recovery.maxPacketThreshold
         )
         let lossDelay = Recovery.lossDelay(state: state)
-        var remove = [Bool](repeating: false, count: self.packets.count)
-        var anyLost = false
-        for (index, packet) in self.packets.enumerated() {
-            if packet.packetNumber > largestAcknowledged {
+        var lostRanges: [Range<Int>] = []
+        var index = self.head
+        while index < self.storage.count {
+            let packetNumber = self.storage[index].packetNumber
+            if packetNumber > largestAcknowledged {
                 break
             }
-            let lostByTime = Time.elapsed(packet.sentAt, lossDelay, now)
-            let lostByPackets = largestAcknowledged >= packet.packetNumber + threshold
+            let sentAt = self.storage[index].sentAt
+            let lostByTime = Time.elapsed(sentAt, lossDelay, now)
+            let lostByPackets = largestAcknowledged >= packetNumber + threshold
             if lostByTime || lostByPackets {
-                remove[index] = true
-                anyLost = true
-                if result.latestLostSentAt == Time.never {
-                    result.latestLostSentAt = packet.sentAt
-                    result.oldestLostSentAt = packet.sentAt
+                if let last = lostRanges.last, last.upperBound == index {
+                    lostRanges[lostRanges.count - 1] = last.lowerBound..<index + 1
+                } else {
+                    lostRanges.append(index..<index + 1)
                 }
-                result.latestLostSentAt = Swift.max(result.latestLostSentAt, packet.sentAt)
-                result.oldestLostSentAt = Swift.min(result.oldestLostSentAt, packet.sentAt)
+                if result.latestLostSentAt == Time.never {
+                    result.latestLostSentAt = sentAt
+                    result.oldestLostSentAt = sentAt
+                }
+                result.latestLostSentAt = Swift.max(result.latestLostSentAt, sentAt)
+                result.oldestLostSentAt = Swift.min(result.oldestLostSentAt, sentAt)
             } else {
-                let candidate = packet.sentAt.addingClamped(lossDelay)
+                let candidate = sentAt.addingClamped(lossDelay)
                 self.lossTime = self.lossTime == Time.never ? candidate : Swift.min(self.lossTime, candidate)
             }
+            index += 1
         }
-        guard anyLost else {
+        guard !lostRanges.isEmpty else {
             return result
         }
-        var kept: [SentPacket] = []
-        kept.reserveCapacity(self.packets.count)
         var lastLostPacketNumber: UInt64?
         var contiguousOldest: Nanoseconds = Time.never
         var contiguousLatest: Nanoseconds = Time.never
         var contiguousRun = false
-        for (index, packet) in self.packets.enumerated() {
-            if remove[index] {
+        result.lost.reserveCapacity(lostRanges.reduce(0) { $0 + $1.count })
+        for range in lostRanges {
+            for index in range {
+                let packet = self.storage[index]
                 result.bytesLost += self.accountRemoval(packet, state: &state)
                 result.lost.append(packet)
                 if packet.sentAt >= persistentCongestionStart {
@@ -269,11 +322,9 @@ struct SentPacketTracker {
                     contiguousRun = false
                     lastLostPacketNumber = nil
                 }
-            } else {
-                kept.append(packet)
             }
         }
-        self.packets = kept
+        self.removePackets(in: lostRanges)
         if isApplicationSpace,
            result.bytesLost > 0,
            contiguousOldest != Time.never,
@@ -292,14 +343,14 @@ struct SentPacketTracker {
     mutating func reclaimOnPTO(count: Int) -> [SentFrame] {
         var reclaimed: [SentFrame] = []
         var remaining = count
-        var index = self.packets.count - 1
-        while index >= 0, remaining > 0 {
-            if self.packets[index].isRetransmittable, !self.packets[index].isPTOReclaimed {
-                let frames = self.packets[index].frames.filter { $0.isRetransmittable }
-                self.packets[index].isPTOReclaimed = true
+        var index = self.storage.count - 1
+        while index >= self.head, remaining > 0 {
+            if self.storage[index].isRetransmittable, !self.storage[index].isPTOReclaimed {
+                let frames = self.storage[index].frames.filter { $0.isRetransmittable }
+                self.storage[index].isPTOReclaimed = true
                 self.retransmittableCount -= 1
-                if self.packets[index].isPTOEliciting {
-                    self.packets[index].isPTOEliciting = false
+                if self.storage[index].isPTOEliciting {
+                    self.storage[index].isPTOEliciting = false
                     self.ptoElicitingCount -= 1
                 }
                 if !frames.isEmpty {
@@ -313,11 +364,12 @@ struct SentPacketTracker {
     }
 
     mutating func removeAll(state: inout QUICCongestionState) -> [SentPacket] {
-        for packet in self.packets {
+        let removed = Array(self.storage[self.head...])
+        for packet in removed {
             _ = self.accountRemoval(packet, state: &state)
         }
-        let removed = self.packets
-        self.packets.removeAll()
+        self.storage.removeAll()
+        self.head = 0
         self.lossTime = Time.never
         return removed
     }
@@ -325,8 +377,8 @@ struct SentPacketTracker {
     mutating func resetCongestionState(nextPacketNumber: UInt64) {
         self.congestionPacketNumber = nextPacketNumber
         self.congestionBytesInFlight = 0
-        for index in self.packets.indices {
-            self.packets[index].countsTowardCongestion = false
+        for index in self.head..<self.storage.count {
+            self.storage[index].countsTowardCongestion = false
         }
     }
 }
